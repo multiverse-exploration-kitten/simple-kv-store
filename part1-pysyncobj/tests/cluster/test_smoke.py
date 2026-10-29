@@ -21,7 +21,8 @@ def test_three_nodes_elect_one_leader_and_replicate_a_write(cluster: Cluster):
 def test_partition_and_heal_moves_leadership(cluster: Cluster):
     """
     Scenario: cut the leader off from the other two nodes, then heal.
-    Expected: the other two elect a new leader. After heal, all 3 nodes agree on one leader.
+    Expected: the other two elect a new leader and commit a write. After heal, all 3 nodes
+    agree on one leader and have the write.
     Raft lesson: a majority can always make progress without the old leader.
     """
     old_leader = cluster.wait_for_leader()
@@ -29,6 +30,8 @@ def test_partition_and_heal_moves_leadership(cluster: Cluster):
 
     new_leader = cluster.wait_for_leader(among=majority)
     assert new_leader is not old_leader
+    new_leader.put("written-during-partition", "yes")
 
     cluster.heal()
     cluster.wait_for_leader()
+    cluster.wait_for_value_everywhere("written-during-partition", "yes")

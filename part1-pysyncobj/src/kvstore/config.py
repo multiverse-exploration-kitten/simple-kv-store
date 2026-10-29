@@ -69,7 +69,19 @@ class NodeConfig:
             bind_address=environ.get("KV_BIND_ADDRESS", "").strip() or None,
             data_dir=Path(data_dir) if data_dir else None,
             http_host=environ.get("KV_HTTP_HOST", "0.0.0.0"),
-            http_port=int(environ.get("KV_HTTP_PORT", "8000")),
-            command_timeout_seconds=float(environ.get("KV_COMMAND_TIMEOUT_SECONDS", "3.0")),
+            http_port=_parse_number(environ, "KV_HTTP_PORT", "8000", int),
+            command_timeout_seconds=_parse_number(
+                environ, "KV_COMMAND_TIMEOUT_SECONDS", "3.0", float
+            ),
             raft_password=environ.get("KV_RAFT_PASSWORD", "") or None,
         )
+
+
+def _parse_number[T: (int, float)](
+    environ: Mapping[str, str], name: str, default: str, number_type: type[T]
+) -> T:
+    raw_value = environ.get(name, default)
+    try:
+        return number_type(raw_value)
+    except ValueError:
+        raise ValueError(f"{name} must be a {number_type.__name__}, got {raw_value!r}") from None

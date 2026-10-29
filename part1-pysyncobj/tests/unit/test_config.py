@@ -57,3 +57,8 @@ def test_from_env_treats_empty_raft_password_as_none():
         NodeConfig.from_env({"KV_SELF_ADDRESS": "n:1", "KV_RAFT_PASSWORD": ""}).raft_password
         is None
     )
+
+
+def test_from_env_names_the_variable_with_a_bad_number():
+    with pytest.raises(ValueError, match="KV_HTTP_PORT"):
+        NodeConfig.from_env({"KV_SELF_ADDRESS": "node1:4321", "KV_HTTP_PORT": "80o1"})

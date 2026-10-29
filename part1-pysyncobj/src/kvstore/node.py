@@ -109,7 +109,7 @@ class KeyValueNode:
     def get(
         self, key: str, consistency: ReadConsistency = ReadConsistency.LINEARIZABLE
     ) -> str | None:
-        if consistency is ReadConsistency.STALE:
+        if consistency == ReadConsistency.STALE:
             return self._store.read_local(key)
         return self._run_command(self._store.read, key)
 

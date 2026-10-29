@@ -6,7 +6,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from kvstore.config import NodeConfig, RaftTimings
-from kvstore.node import KeyValueNode
+from kvstore.node import KeyValueNode, ReadConsistency
 from tests.cluster.faults import NetworkFaults
 
 DEFAULT_WAIT_SECONDS = 15.0
@@ -151,8 +151,6 @@ class Cluster:
         self, key: str, expected_value: str | None, timeout: float = DEFAULT_WAIT_SECONDS
     ) -> None:
         """Wait until every running node has applied the same value for the key."""
-        from kvstore.node import ReadConsistency
-
         wait_until(
             lambda: all(
                 node.get(key, ReadConsistency.STALE) == expected_value for node in self.nodes
