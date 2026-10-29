@@ -307,6 +307,7 @@ The general rules are in the study guide [../docs/raft-in-production.md](../docs
 - Peer traffic is pickle. Without `KV_RAFT_PASSWORD`, anyone who reaches port 4321 can run code. The password gives encryption and signing, not mutual TLS.
 - Replicated methods are numbered by sorted (version, name). A new command or a rename can break a mixed-version cluster.
 - A wrong password gives no log line, only a cluster that cannot join.
+- An exception inside a replicated method stops the log on every node for good. `KeyValueNode` checks the input first.
 - No pre-vote. A rejoining node with a high term forces the healthy leader to step down.
 - No ReadIndex or lease reads. Each linearizable read is a log entry.
 - No fsync. The journal is a memory-mapped file. A power loss can lose recent entries.

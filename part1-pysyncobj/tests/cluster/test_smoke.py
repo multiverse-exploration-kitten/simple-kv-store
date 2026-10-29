@@ -1,3 +1,5 @@
+import pytest
+
 from kvstore.node import ReadConsistency
 from tests.cluster.harness import Cluster
 
@@ -35,3 +37,20 @@ def test_partition_and_heal_moves_leadership(cluster: Cluster):
     cluster.heal()
     cluster.wait_for_leader()
     cluster.wait_for_value_everywhere("written-during-partition", "yes")
+
+
+def test_bad_argument_is_rejected_before_it_enters_the_log(cluster: Cluster):
+    """
+    Scenario: call put() with a list as the key, then write a normal value.
+    Expected: TypeError at once. The cluster keeps working.
+    Raft lesson: pysyncobj stops applying the log on every node if a replicated method
+    raises. One bad command can stop the whole cluster for good. Validate input before
+    the command enters the log, and keep apply free of exceptions.
+    """
+    leader = cluster.wait_for_leader()
+
+    with pytest.raises(TypeError, match="key must be a str"):
+        leader.put(["not", "a", "string"], "value")  # type: ignore[arg-type]
+
+    leader.put("after-bad-command", "ok")
+    cluster.wait_for_value_everywhere("after-bad-command", "ok")

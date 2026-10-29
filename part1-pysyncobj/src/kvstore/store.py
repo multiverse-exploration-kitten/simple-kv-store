@@ -13,6 +13,9 @@ class ReplicatedKeyValueStore(SyncObjConsumer):
     other methods, and a cluster with mixed code versions applies the wrong method. To add
     or change a command, give it a ver higher than every existing one and keep the old
     methods, so nodes can still replay old log entries (AGENTS.md, Raft rule 2).
+
+    A @replicated method must never raise. An exception stops pysyncobj from applying any
+    later entry on every node. KeyValueNode checks the arguments before it sends a command.
     """
 
     def __init__(self) -> None:

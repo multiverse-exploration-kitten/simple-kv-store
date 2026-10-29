@@ -216,3 +216,15 @@ A mixed-version cluster during a rolling upgrade then applies the wrong method.
 **Production.** Version the commands. A format change must not break nodes that run the old version (AGENTS.md, Raft rule 2).
 
 **This repo.** Add a new command with a higher `ver`. Do not rename an existing replicated method.
+
+## 19. An exception in a replicated method stops the whole cluster
+
+**What we saw.** The pysyncobj study (see [pysyncobj-reference.md](pysyncobj-reference.md)) raised an exception inside a `@replicated` method.
+After that, no node applied any later entry, and the cluster had no leader. It did not recover.
+
+**Why.** Every node applies the same entry, so every node hits the same exception. pysyncobj does not skip the entry.
+
+**Production.** Keep apply free of exceptions. Validate input before the command enters the log. Return an error value from apply instead of raising.
+
+**This repo.** `KeyValueNode` checks that keys and values are strings before it sends a command (`_require_text` in `node.py`).
+Test: `test_bad_argument_is_rejected_before_it_enters_the_log` in `tests/cluster/test_smoke.py`.

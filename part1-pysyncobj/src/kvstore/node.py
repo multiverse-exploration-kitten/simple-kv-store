@@ -98,17 +98,23 @@ class KeyValueNode:
         return self._config.self_address
 
     def put(self, key: str, value: str) -> None:
+        _require_text(key=key, value=value)
         self._run_command(self._store.put, key, value)
 
     def delete(self, key: str) -> bool:
+        _require_text(key=key)
         return self._run_command(self._store.delete, key)
 
     def compare_and_set(self, key: str, expected_value: str | None, new_value: str) -> bool:
+        _require_text(key=key, new_value=new_value)
+        if expected_value is not None:
+            _require_text(expected_value=expected_value)
         return self._run_command(self._store.compare_and_set, key, expected_value, new_value)
 
     def get(
         self, key: str, consistency: ReadConsistency = ReadConsistency.LINEARIZABLE
     ) -> str | None:
+        _require_text(key=key)
         if consistency == ReadConsistency.STALE:
             return self._store.read_local(key)
         return self._run_command(self._store.read, key)
@@ -197,6 +203,17 @@ class KeyValueNode:
             )
         except SyncObjException as error:
             raise _translate_failure(error.errorCode) from error
+
+
+def _require_text(**arguments: Any) -> None:
+    """Reject a bad argument before the command enters the log.
+
+    If a @replicated method raises, pysyncobj stops applying all later entries on every
+    node, so the whole cluster stops for good. Check the input here, not in apply.
+    """
+    for name, value in arguments.items():
+        if not isinstance(value, str):
+            raise TypeError(f"{name} must be a str, got {type(value).__name__}")
 
 
 def _translate_failure(error_code: Any) -> Exception:
