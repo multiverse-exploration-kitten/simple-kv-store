@@ -9,7 +9,7 @@ from pysyncobj.syncobj import _RAFT_STATE
 from pysyncobj.transport import TCPTransport
 
 from kvstore.config import NodeConfig
-from kvstore.errors import CommandOutcomeUnknownError, CommandRejectedError
+from kvstore.errors import CommandOutcomeUnknownError, CommandRejectedError, KeyValueStoreError
 from kvstore.store import ReplicatedKeyValueStore
 
 
@@ -45,6 +45,8 @@ _STATE_NAMES = {
 
 JOURNAL_FILE_NAME = "raft.journal"
 SNAPSHOT_FILE_NAME = "raft.snapshot"
+READY_BARRIER_KEY = ""  # is_ready() reads this key through the log. Its value does not matter.
+STATUS_READ_ATTEMPTS = 3
 
 
 def build_syncobj_conf(config: NodeConfig) -> SyncObjConf:
@@ -80,6 +82,7 @@ class KeyValueNode:
         self, config: NodeConfig, transport_class: type[TCPTransport] = TCPTransport
     ) -> None:
         self._config = config
+        self._caught_up = False
         self._store = ReplicatedKeyValueStore()
         self._sync_obj = SyncObj(
             config.self_address,
@@ -116,12 +119,35 @@ class KeyValueNode:
         leader = self._sync_obj._getLeader()
         return None if leader is None else leader.address
 
+    def has_quorum(self) -> bool:
+        """True if this node has open connections to a majority (itself included).
+
+        It checks TCP connections only. A link that loses packets but stays open still counts.
+        """
+        return bool(self._sync_obj.hasQuorum)
+
     def is_ready(self) -> bool:
-        """True after this node applied the log that the leader had when this node started."""
-        return self._sync_obj.isReady()
+        """True when this node has applied every write that was committed before it started.
+
+        pysyncobj's isReady() alone is not enough. After a full cluster restart, a new leader
+        reports its old saved commit index until it commits an entry in its own term. So a
+        node can be "ready" and still miss committed writes. One linearizable read fixes it:
+        when the read returns, this node has applied every entry before it. The check can
+        block for up to the command timeout, so call it from health checks, not from /status.
+        """
+        if self._caught_up:
+            return True
+        if not self._sync_obj.isReady():
+            return False
+        try:
+            self._run_command(self._store.read, READY_BARRIER_KEY)
+        except KeyValueStoreError:
+            return False
+        self._caught_up = True
+        return True
 
     def status(self) -> dict[str, Any]:
-        raw_status = self._sync_obj.getStatus()
+        raw_status = self._read_raw_status()
         peers = {
             peer_address: {
                 "connected": raw_status.get(f"partner_node_status_server_{peer_address}") == 2,
@@ -136,7 +162,7 @@ class KeyValueNode:
             "leader": self.leader_address(),
             "term": raw_status["raft_term"],
             "has_quorum": bool(raw_status["has_quorum"]),
-            "ready": self.is_ready(),
+            "ready": self._caught_up,  # set by the first successful is_ready() check
             "commit_index": raw_status["commit_idx"],
             "last_applied": raw_status["last_applied"],
             "log_length": raw_status["log_len"],
@@ -148,7 +174,22 @@ class KeyValueNode:
         """Stop the Raft thread, close the sockets and the journal."""
         self._sync_obj.destroy_synchronous()
 
+    def _read_raw_status(self) -> dict[str, Any]:
+        # getStatus() loops over pysyncobj dicts that the Raft thread can change at the same
+        # time (for example during a leader change). Then it raises RuntimeError. Try again.
+        for _ in range(STATUS_READ_ATTEMPTS - 1):
+            try:
+                return self._sync_obj.getStatus()
+            except RuntimeError:
+                continue
+        return self._sync_obj.getStatus()
+
     def _run_command(self, replicated_method: Callable[..., Any], *arguments: Any) -> Any:
+        # Fail fast (AGENTS.md, Raft rule 6). Without open connections to a majority, no
+        # command can commit. Without this check, a follower whose peers died keeps the dead
+        # leader's address and waits the full timeout on every command.
+        if not self._sync_obj.hasQuorum:
+            raise CommandRejectedError("no_quorum")
         try:
             return replicated_method(
                 *arguments, sync=True, timeout=self._config.command_timeout_seconds

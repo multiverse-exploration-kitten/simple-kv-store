@@ -27,6 +27,8 @@ class KeyValueNodeProtocol(Protocol):
 
     def is_ready(self) -> bool: ...
 
+    def has_quorum(self) -> bool: ...
+
 
 class PutRequest(BaseModel):
     value: str
@@ -119,7 +121,7 @@ def create_app(node: KeyValueNodeProtocol) -> FastAPI:
     @app.get("/health/ready")
     def health_ready() -> JSONResponse:
         leader_address = node.leader_address()
-        is_ready = leader_address is not None and node.is_ready()
+        is_ready = leader_address is not None and node.has_quorum() and node.is_ready()
         return JSONResponse(
             status_code=200 if is_ready else 503,
             content={"status": "ready" if is_ready else "not_ready", "leader": leader_address},

@@ -17,6 +17,7 @@ class FakeNode:
         self.error_to_raise: Exception | None = None
         self.leader: str | None = "node1:4321"
         self.ready = True
+        self.quorum = True
 
     def _maybe_fail(self) -> None:
         if self.error_to_raise is not None:
@@ -52,6 +53,9 @@ class FakeNode:
 
     def is_ready(self) -> bool:
         return self.ready
+
+    def has_quorum(self) -> bool:
+        return self.quorum
 
 
 @pytest.fixture
@@ -140,6 +144,11 @@ def test_health_ready_503_without_leader(client: TestClient, fake_node: FakeNode
 
 def test_health_ready_503_when_not_ready(client: TestClient, fake_node: FakeNode) -> None:
     fake_node.ready = False
+    assert client.get("/health/ready").status_code == 503
+
+
+def test_health_ready_503_without_quorum(client: TestClient, fake_node: FakeNode) -> None:
+    fake_node.quorum = False
     assert client.get("/health/ready").status_code == 503
 
 
