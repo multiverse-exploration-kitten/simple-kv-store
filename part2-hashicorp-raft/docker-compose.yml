@@ -1,0 +1,128 @@
+# A 3-node Raft cluster. Start it from part2-hashicorp-raft/: make up
+#
+# HTTP API on the host: node1 8101, node2 8102, node3 8103. The Raft port 7000
+# stays inside the "raft" network and uses mutual TLS. The e2e tests start a
+# second cluster next to this one. They use another project name (-p), other
+# host ports (KV_NODE<N>_HTTP_PORT) and another subnet (KV_SUBNET_PREFIX).
+#
+# 3 nodes: a majority of 3 is 2, so the cluster survives one failed node.
+# A 4th node would raise the majority to 3 and still survive only one.
+
+name: kvstore-part2
+
+# Raft addresses are IP:port everywhere: raft's TCP transport cannot advertise
+# a host name, and one form avoids two names for one server. nodeN has the
+# static IP <prefix>.1N.
+x-raft-peers: &raft-peers node1=${KV_SUBNET_PREFIX:-172.28.11}.11:7000,node2=${KV_SUBNET_PREFIX:-172.28.11}.12:7000,node3=${KV_SUBNET_PREFIX:-172.28.11}.13:7000
+
+x-kvstore-env: &kvstore-env
+  KV_RAFT_BIND_ADDRESS: 0.0.0.0:7000
+  KV_HTTP_ADDRESS: :8000
+  KV_DATA_DIR: /data
+  # Every initial node bootstraps with the same list. A node with data on its
+  # volume skips the bootstrap.
+  KV_BOOTSTRAP: "true"
+  KV_PEERS: *raft-peers
+  KV_PEER_HTTP: node1=http://${KV_SUBNET_PREFIX:-172.28.11}.11:8000,node2=http://${KV_SUBNET_PREFIX:-172.28.11}.12:8000,node3=http://${KV_SUBNET_PREFIX:-172.28.11}.13:8000
+  KV_RAFT_TLS_CA_FILE: /certs/ca.crt
+  KV_LOG_JSON: "true"
+  KV_LOG_LEVEL: ${KV_LOG_LEVEL:-info}
+
+x-kvstore-node: &kvstore-node
+  # No shared `image:` name. Compose 2.17 builds each service on its own and
+  # adds a per-service label, so a shared tag would leave dangling images.
+  build: .
+  # The chaos commands and the e2e tests decide when a stopped node comes back.
+  restart: "no"
+  depends_on:
+    certs:
+      condition: service_completed_successfully
+  # SIGTERM: leadership transfer (up to KV_COMMAND_TIMEOUT), then the HTTP
+  # drain (up to 15 s), then the raft shutdown. Docker's default 10 s is too short.
+  stop_grace_period: 30s
+  healthcheck:
+    # The image has no shell and no curl.
+    test: ["CMD", "/kvstore", "healthcheck"]
+    interval: 2s
+    timeout: 3s
+    retries: 10
+    start_period: 10s
+
+services:
+  # Creates the CA and the node certificates once. A second run keeps them.
+  # Same uid as the nodes (nonroot, 65532), so the nodes can read the 0600 keys.
+  certs:
+    build: .
+    restart: "no"
+    command: ["gencerts", "-dir", "/certs"]
+    environment:
+      KV_PEERS: *raft-peers
+    volumes:
+      - certs:/certs
+    network_mode: none
+
+  node1:
+    <<: *kvstore-node
+    environment:
+      <<: *kvstore-env
+      KV_NODE_ID: node1
+      KV_RAFT_ADDRESS: ${KV_SUBNET_PREFIX:-172.28.11}.11:7000
+      KV_RAFT_TLS_CERT_FILE: /certs/node1.crt
+      KV_RAFT_TLS_KEY_FILE: /certs/node1.key
+    ports:
+      - "${KV_NODE1_HTTP_PORT:-8101}:8000"
+    volumes:
+      - node1-data:/data
+      - certs:/certs:ro
+    networks:
+      raft:
+        ipv4_address: ${KV_SUBNET_PREFIX:-172.28.11}.11
+
+  node2:
+    <<: *kvstore-node
+    environment:
+      <<: *kvstore-env
+      KV_NODE_ID: node2
+      KV_RAFT_ADDRESS: ${KV_SUBNET_PREFIX:-172.28.11}.12:7000
+      KV_RAFT_TLS_CERT_FILE: /certs/node2.crt
+      KV_RAFT_TLS_KEY_FILE: /certs/node2.key
+    ports:
+      - "${KV_NODE2_HTTP_PORT:-8102}:8000"
+    volumes:
+      - node2-data:/data
+      - certs:/certs:ro
+    networks:
+      raft:
+        ipv4_address: ${KV_SUBNET_PREFIX:-172.28.11}.12
+
+  node3:
+    <<: *kvstore-node
+    environment:
+      <<: *kvstore-env
+      KV_NODE_ID: node3
+      KV_RAFT_ADDRESS: ${KV_SUBNET_PREFIX:-172.28.11}.13:7000
+      KV_RAFT_TLS_CERT_FILE: /certs/node3.crt
+      KV_RAFT_TLS_KEY_FILE: /certs/node3.key
+    ports:
+      - "${KV_NODE3_HTTP_PORT:-8103}:8000"
+    volumes:
+      - node3-data:/data
+      - certs:/certs:ro
+    networks:
+      raft:
+        ipv4_address: ${KV_SUBNET_PREFIX:-172.28.11}.13
+
+networks:
+  # Static IPs, because the Raft addresses are IPs. `make heal` connects a
+  # node again with the same IP.
+  raft:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${KV_SUBNET_PREFIX:-172.28.11}.0/24
+
+volumes:
+  certs:
+  node1-data:
+  node2-data:
+  node3-data:

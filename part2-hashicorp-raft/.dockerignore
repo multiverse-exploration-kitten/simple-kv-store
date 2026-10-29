@@ -1,0 +1,7 @@
+# Allowlist: the image needs only the module files and the non-test Go code.
+*
+!go.mod
+!go.sum
+!cmd/
+!internal/
+**/*_test.go

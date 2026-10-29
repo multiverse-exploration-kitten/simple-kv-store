@@ -5,8 +5,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -265,6 +267,50 @@ func TestHoldEndsWith503WhenLeaderStaysUnreachable(t *testing.T) {
 				t.Fatalf("answered after %s and %d tries, want at least %s and 2 tries", elapsed, follower.calls.Load(), holdTimeout)
 			}
 		})
+	}
+}
+
+// Scenario: the node names a killed leader. Its IP does not answer, so the
+// dial blocks (the seam blocks until the dial context ends). Then the node
+// names the new leader.
+// Expected: the dial gives up after DialTimeout, long before ForwardTimeout.
+// The hold retries, asks the node again and gets the answer of the new
+// leader, all within HoldTimeout.
+// Without DialTimeout the dial would hang until ForwardTimeout (3 s), after
+// the hold deadline (2 s): 503 leader_unreachable.
+func TestHoldRetriesWhenDialToLeaderTimesOut(t *testing.T) {
+	newLeader := newFakeLeaderServer(t, answerJSON(200, `{"key":"a","value":"x"}`, HeaderServedBy, "node3"))
+	deadLeaderURL := closedServerURL()
+	deadLeaderAddress := strings.TrimPrefix(deadLeaderURL, "http://")
+	var blockedDials atomic.Int64
+	follower := newFollowerFake()
+	follower.get = func(context.Context, string, node.ReadOptions) (node.ReadResult, error) {
+		if follower.calls.Load() == 1 {
+			return node.ReadResult{}, notLeaderOf("node1")
+		}
+		return node.ReadResult{}, notLeaderOf("node3")
+	}
+	handler := New(follower, PeerDirectory{"node1": deadLeaderURL, "node3": newLeader.server.URL}, Options{
+		HoldTimeout:    2 * time.Second,
+		ForwardTimeout: 3 * time.Second,
+		DialTimeout:    100 * time.Millisecond,
+		dialControl: func(ctx context.Context, _, address string, _ syscall.RawConn) error {
+			if address != deadLeaderAddress {
+				return nil
+			}
+			blockedDials.Add(1)
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	})
+
+	response := serveTest(t, handler, "GET", "/kv/a", "", nil)
+
+	if response.status != 200 || response.header.Get(HeaderServedBy) != "node3" {
+		t.Fatalf("status %d header %v body %s", response.status, response.header, response.text)
+	}
+	if blockedDials.Load() != 1 || follower.calls.Load() != 2 || len(newLeader.requests()) != 1 {
+		t.Fatalf("blocked dials %d, node calls %d, new leader requests %d, want 1, 2 and 1", blockedDials.Load(), follower.calls.Load(), len(newLeader.requests()))
 	}
 }
 

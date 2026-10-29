@@ -15,8 +15,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/hashicorp/go-hclog"
@@ -53,6 +55,7 @@ const (
 const (
 	defaultHoldTimeout    = 5 * time.Second
 	defaultForwardTimeout = 10 * time.Second
+	defaultDialTimeout    = time.Second
 	// JSON can write one value byte as 6 bytes (\u0000). The node checks
 	// the decoded value against MaxValueBytes (413).
 	maxRequestBodyBytes = 6*node.MaxValueBytes + 4096
@@ -93,8 +96,19 @@ type Options struct {
 	// leader's CommandTimeout, so that the leader's own answer comes first.
 	// Default 10 s.
 	ForwardTimeout time.Duration
+	// DialTimeout limits the TCP connect to the leader. The IP of a killed
+	// leader does not answer, and without this limit the dial hangs until
+	// ForwardTimeout: the hold has no time left to reach the new leader. A
+	// connect timeout is a dial error (nothing was sent), so the hold
+	// retries it. Default 1 s.
+	DialTimeout time.Duration
 	// Logger default: no logs.
 	Logger hclog.Logger
+
+	// dialControl is a unit test seam. It runs in every dial to a peer,
+	// after the socket exists and before the connect (net.Dialer
+	// ControlContext). Its context has the DialTimeout deadline.
+	dialControl func(ctx context.Context, network, address string, conn syscall.RawConn) error
 }
 
 type api struct {
@@ -114,11 +128,16 @@ func New(localNode NodeAPI, peers PeerDirectory, opts Options) http.Handler {
 	if opts.ForwardTimeout == 0 {
 		opts.ForwardTimeout = defaultForwardTimeout
 	}
+	if opts.DialTimeout == 0 {
+		opts.DialTimeout = defaultDialTimeout
+	}
 	if opts.Logger == nil {
 		opts.Logger = hclog.NewNullLogger()
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil // peers talk directly, also when HTTP_PROXY is set
+	dialer := &net.Dialer{Timeout: opts.DialTimeout, KeepAlive: 30 * time.Second, ControlContext: opts.dialControl}
+	transport.DialContext = dialer.DialContext
 	server := &api{
 		node:    localNode,
 		peers:   peers,

@@ -5,8 +5,10 @@
 - Wave 0 (research) done: `part2-hashicorp-raft/docs/{hashicorp-raft-reference,hashicorp-raft-storage-and-transport,production-patterns}.md`. Plan written.
 - Wave 1 (phase 1, core) done: 73 unit tests, 4 smoke tests, lint clean. Contract changes are in "Phase 1 changes to the contracts".
 - Wave 2 (phases 2-7) done: 215 unit tests, 38 cluster tests (Porcupine check included), lint clean.
-- Next: phase 1 fixes (VerifyLeader outside the deadline, ErrEnqueueTimeout reported as 504, shared store opener), phase 8 (running), then phase 9 docs.
-- Do not run `go mod tidy` before phase 8 imports the go-metrics Prometheus sink.
+- Phase 1 fixes done: every raft call runs under the deadline, enqueue timeout = 503, one store opener.
+- Phases 8 and 9 done: binary, Docker (mutual TLS, distroless), Makefile, 6 e2e subtests, README, 27 lessons. Forward dial timeout 1 s (lesson 27).
+- Last full run: `go test -race ./...` all 7 packages ok (cluster 105 s), `make e2e` 6/6 ok, lint clean.
+- Next: one code review of part 2. The user decides what to fix.
 - Gotcha: under parallel `-race` load a test process can pause for 230 ms. Tests that assert "no leader change" use 500 ms timeouts.
 
 ## Goal
@@ -41,8 +43,8 @@ Read the three research docs in `part2-hashicorp-raft/docs/` before you write co
 | HTTP | `net/http` with Go 1.22 patterns. No framework. JSON bodies. | Standard library is enough. |
 | Logs, metrics | `hclog` (JSON in Docker). `hashicorp/go-metrics` Prometheus sink at `/metrics`. | Library's own stack. |
 | Lint | `gofmt -l`, `go vet`, `go tool staticcheck` (tool dependency in go.mod). | No global install. |
-| Tests | Unit tests next to the code (`internal/**/*_test.go`, Go convention). Cluster tests in `tests/cluster/` with real TCP on 127.0.0.1, real raft-wal stores in `t.TempDir()`, and a fault-injecting transport. E2E in `tests/e2e/` with build tag `e2e`. Linearizability check with Porcupine. | AGENTS.md test levels. |
-| Docker | Multi-stage build, `gcr.io/distroless/static-debian12:nonroot`. `kvstore healthcheck` subcommand for the healthcheck. Project `kvstore-part2`, subnet `172.28.2.0/24`, HTTP ports 8101-8103, Raft port 7000 (internal). | No shell in the image. Part 1 and part 2 can run at the same time. |
+| Tests | Unit tests next to the code (`internal/**/*_test.go`, Go convention). Cluster tests in `tests/cluster/` with real TCP on 127.0.0.1, real raft-boltdb stores in `t.TempDir()`, and a fault-injecting transport. E2E in `tests/e2e/` with build tag `e2e`. Linearizability check with Porcupine. | AGENTS.md test levels. |
+| Docker | Multi-stage build, `gcr.io/distroless/static-debian12:nonroot`. `kvstore healthcheck` subcommand for the healthcheck. Project `kvstore-part2`, subnet `172.28.11.0/24` (e2e: `172.28.12.0/24`), HTTP ports 8101-8103, Raft port 7000 (internal). | No shell in the image. Part 1 and part 2 can run at the same time. |
 
 ## Architecture
 
@@ -265,11 +267,11 @@ Rules for every builder:
 
 ### Phase 8: Binary, Docker, e2e
 
-- [ ] `cmd/kvstore`: `serve` (config → transport → node → httpapi → `http.Server`. On SIGTERM: leadership transfer if leader, graceful HTTP stop, `node.Close()`), `healthcheck` (GET `/health/live`, exit code), `gencerts` (calls `tlsstream.GenerateCertificates`).
-- [ ] `Dockerfile`, `.dockerignore`, `docker-compose.yml` (3 nodes, `certs` init service, static IPs, one volume per node, healthcheck), `Makefile` (help, lint, test, e2e, up, down, logs, status, kill-leader, partition, heal, pause, unpause, start).
-- [ ] `tests/e2e/` (`//go:build e2e`): own compose project and ports. Replicate across nodes, write through a follower, kill the leader, pause a follower, disconnect the leader from the network, stop 2 nodes then expect 503 or 504.
+- [x] `cmd/kvstore`: `serve` (config → transport → node → httpapi → `http.Server`. On SIGTERM: leadership transfer if leader, graceful HTTP stop, `node.Close()`), `healthcheck` (GET `/health/live`, exit code), `gencerts` (calls `tlsstream.GenerateCertificates`).
+- [x] `Dockerfile`, `.dockerignore`, `docker-compose.yml` (3 nodes, `certs` init service, static IPs, one volume per node, healthcheck), `Makefile` (help, lint, test, e2e, up, down, logs, status, kill-leader, partition, heal, pause, unpause, start).
+- [x] `tests/e2e/` (`//go:build e2e`): own compose project and ports. Replicate across nodes, write through a follower, kill the leader, pause a follower, disconnect the leader from the network, stop 2 nodes then expect 503 or 504.
 
 ### Phase 9: Docs
 
-- [ ] `README.md`: what it is, architecture, API, run, test, chaos commands, a table "failure scenario → test → Raft lesson", and "part 1 vs part 2".
-- [ ] `docs/lessons-from-tests.md`: what the tests found about hashicorp/raft.
+- [x] `README.md`: what it is, architecture, API, run, test, chaos commands, a table "failure scenario → test → Raft lesson", and "part 1 vs part 2".
+- [x] `docs/lessons-from-tests.md`: what the tests found about hashicorp/raft.

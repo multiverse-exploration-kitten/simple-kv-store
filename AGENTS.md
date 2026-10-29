@@ -31,7 +31,7 @@ Shared study material:
 1. Use descriptive names. Do not use one-letter names, except `i` in a short loop.
 2. Follow SOLID where it removes real coupling. Do not add layers, factories or interfaces that have only one use and no test need.
 3. Python: type hints on every public function. `ruff check` and `ruff format --check` must pass.
-4. Go (parts 2, 3): `gofmt`, `go vet` and `golangci-lint` (if configured) must pass.
+4. Go (parts 2, 3): `gofmt`, `go vet` and `staticcheck` (a `go tool` dependency in go.mod) must pass.
 5. Keep comments short. Write a comment only when the code cannot say why.
 
 ## 4. Raft rules (production correctness)
@@ -75,10 +75,24 @@ docker compose down -v                   # stop the cluster and delete its data
 
 The part 1 README has the full list, including chaos commands.
 
-## 7. Workflow for agents
+## 7. Part 2 commands
+
+Run all commands from `part2-hashicorp-raft/`. Set `GOTOOLCHAIN=local` (the Makefile does it).
+
+```bash
+make lint                                # gofmt, go vet, go tool staticcheck
+make test                                # unit + cluster tests with -race
+make e2e                                 # e2e tests (build tag e2e) on their own Docker cluster
+make up                                  # start 3 nodes on ports 8101-8103 (mutual TLS between peers)
+make down                                # stop the cluster and delete its data and certificates
+```
+
+Do not run `go mod tidy` while a package that is in go.mod is not imported yet. Tidy removes it. The part 2 README has the full list, including chaos commands.
+
+## 8. Workflow for agents
 
 1. Read this file, the part README and the part plan in `docs/plans/` first.
 2. Write or update the plan before a big change. Keep its `## Status` block current.
 3. Write the test first for a new failure scenario. See it fail. Then fix the code.
-4. Before you say "done": run ruff, run the tests, and (for Docker changes) start the cluster and run the e2e tests. Report the real output.
+4. Before you say "done": run the linters (`make lint`), run the tests, and (for Docker changes) start the cluster and run the e2e tests. Report the real output.
 5. Record what you learn about a Raft library (gotchas, bugs, defaults) in the part `docs/` folder, not only in chat.
