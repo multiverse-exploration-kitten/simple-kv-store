@@ -73,6 +73,7 @@ def build_syncobj_conf(config: NodeConfig) -> SyncObjConf:
         # fork() in a process with threads (uvicorn, tests) can deadlock. The cost: the
         # snapshot blocks the Raft thread while it writes, so keep the state small.
         useFork=False,
+        password=config.raft_password,
         **data_files,
     )
 

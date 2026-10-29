@@ -6,6 +6,10 @@
 
 name: kvstore-part1
 
+x-kvstore-env: &kvstore-env
+  # All nodes need the same password. Set your own secret outside local development.
+  KV_RAFT_PASSWORD: ${KV_RAFT_PASSWORD:-dev-only-change-me}
+
 x-kvstore-node: &kvstore-node
   # No shared `image:` name. Compose 2.17 builds each service on its own and adds a
   # per-service label, so a shared tag would leave 2 dangling images per build.
@@ -29,6 +33,7 @@ services:
   node1:
     <<: *kvstore-node
     environment:
+      <<: *kvstore-env
       KV_SELF_ADDRESS: node1:4321
       KV_BIND_ADDRESS: 0.0.0.0:4321
       KV_PEERS: node1:4321,node2:4321,node3:4321
@@ -44,6 +49,7 @@ services:
   node2:
     <<: *kvstore-node
     environment:
+      <<: *kvstore-env
       KV_SELF_ADDRESS: node2:4321
       KV_BIND_ADDRESS: 0.0.0.0:4321
       KV_PEERS: node1:4321,node2:4321,node3:4321
@@ -59,6 +65,7 @@ services:
   node3:
     <<: *kvstore-node
     environment:
+      <<: *kvstore-env
       KV_SELF_ADDRESS: node3:4321
       KV_BIND_ADDRESS: 0.0.0.0:4321
       KV_PEERS: node1:4321,node2:4321,node3:4321

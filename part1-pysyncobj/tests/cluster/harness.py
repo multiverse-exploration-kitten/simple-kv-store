@@ -51,6 +51,7 @@ class Cluster:
         command_timeout_seconds: float = 2.0,
         log_compaction_min_entries: int = 5000,
         timings: RaftTimings | None = None,
+        raft_password: str | None = None,
     ) -> None:
         self.faults = NetworkFaults()
         self.addresses = [f"127.0.0.1:{find_free_port()}" for _ in range(size)]
@@ -58,13 +59,15 @@ class Cluster:
         self._command_timeout_seconds = command_timeout_seconds
         self._log_compaction_min_entries = log_compaction_min_entries
         self._timings = timings or RaftTimings.for_tests()
+        self._raft_password = raft_password
         self._running_nodes: dict[str, KeyValueNode] = {}
         for address in self.addresses:
             self.start(address)
 
     # --- node lifecycle ---------------------------------------------------------------
 
-    def start(self, address: str) -> KeyValueNode:
+    def start(self, address: str, raft_password: str | None = None) -> KeyValueNode:
+        """Start a node. raft_password overrides the cluster password for this node only."""
         assert address not in self._running_nodes, f"{address} is already running"
         config = NodeConfig(
             self_address=address,
@@ -73,6 +76,7 @@ class Cluster:
             command_timeout_seconds=self._command_timeout_seconds,
             log_compaction_min_entries=self._log_compaction_min_entries,
             timings=self._timings,
+            raft_password=raft_password or self._raft_password,
         )
         node = KeyValueNode(config, transport_class=self.faults.transport_class())
         self._running_nodes[address] = node

@@ -44,3 +44,16 @@ def test_test_timings_keep_heartbeat_well_below_election_timeout():
     timings = RaftTimings.for_tests()
     assert timings.heartbeat_interval * 3 < timings.election_timeout_min
     assert timings.election_timeout_min < timings.election_timeout_max
+
+
+def test_from_env_reads_raft_password():
+    config = NodeConfig.from_env({"KV_SELF_ADDRESS": "node1:4321", "KV_RAFT_PASSWORD": "s3cret"})
+    assert config.raft_password == "s3cret"
+
+
+def test_from_env_treats_empty_raft_password_as_none():
+    assert NodeConfig.from_env({"KV_SELF_ADDRESS": "n:1"}).raft_password is None
+    assert (
+        NodeConfig.from_env({"KV_SELF_ADDRESS": "n:1", "KV_RAFT_PASSWORD": ""}).raft_password
+        is None
+    )

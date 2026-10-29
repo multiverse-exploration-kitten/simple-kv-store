@@ -47,6 +47,9 @@ class NodeConfig:
     log_compaction_min_entries: int = 5000
     log_compaction_min_seconds: int = 300
     timings: RaftTimings = field(default_factory=RaftTimings)
+    # pysyncobj sends peer messages as pickles. Without a password, anyone who can reach the
+    # Raft port can run code on the node. With it, every peer message is encrypted and signed.
+    raft_password: str | None = None
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "NodeConfig":
@@ -68,4 +71,5 @@ class NodeConfig:
             http_host=environ.get("KV_HTTP_HOST", "0.0.0.0"),
             http_port=int(environ.get("KV_HTTP_PORT", "8000")),
             command_timeout_seconds=float(environ.get("KV_COMMAND_TIMEOUT_SECONDS", "3.0")),
+            raft_password=environ.get("KV_RAFT_PASSWORD", "") or None,
         )
