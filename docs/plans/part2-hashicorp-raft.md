@@ -4,7 +4,7 @@
 
 - Wave 0 (research) done: `part2-hashicorp-raft/docs/{hashicorp-raft-reference,hashicorp-raft-storage-and-transport,production-patterns}.md`. Plan written.
 - Wave 1 (phase 1, core) done: 73 unit tests, 4 smoke tests, lint clean. Contract changes are in "Phase 1 changes to the contracts".
-- Wave 2 (phases 2-7) done: 215 unit tests, about 45 cluster tests (Porcupine check included), lint clean.
+- Wave 2 (phases 2-7) done: 215 unit tests, 38 cluster tests (Porcupine check included), lint clean.
 - Next: phase 1 fixes (VerifyLeader outside the deadline, ErrEnqueueTimeout reported as 504, shared store opener), phase 8 (running), then phase 9 docs.
 - Do not run `go mod tidy` before phase 8 imports the go-metrics Prometheus sink.
 - Gotcha: under parallel `-race` load a test process can pause for 230 ms. Tests that assert "no leader change" use 500 ms timeouts.
