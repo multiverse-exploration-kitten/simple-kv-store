@@ -295,3 +295,57 @@ func TestMembershipVerifyLeaderCountsNonvoterIssue725(t *testing.T) {
 		return !leader.IsLeader()
 	})
 }
+
+// Scenario: the leader gets AddNonvoter for a server that is already a
+// voter, first with its real address and then with a wrong address.
+// Expected: both calls return a ValidationError (HTTP 400). The
+// configuration does not change: same suffrage, same address.
+// Raft lesson: raft.AddNonvoter on an existing voter keeps it a voter but
+// rewrites its address. A typo can then break the quorum. The application
+// must refuse the call.
+func TestMembershipAddNonvoterOnExistingVoterIsRejected(t *testing.T) {
+	cluster := New(t, Options{Timing: membershipTiming})
+	leader := cluster.WaitForLeader()
+	follower := cluster.Followers(leader.ID())[0]
+	configurationBefore, err := leader.Configuration()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, address := range []string{follower.Status().RaftAddress, "127.0.0.1:1"} {
+		err := leader.AddNonvoter(context.Background(), follower.ID(), address)
+		var validationError *node.ValidationError
+		if !errors.As(err, &validationError) {
+			t.Fatalf("AddNonvoter(%s, %s) = %v, want ValidationError", follower.ID(), address, err)
+		}
+	}
+
+	configurationAfter, err := leader.Configuration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(configurationAfter) != fmt.Sprint(configurationBefore) {
+		t.Fatalf("configuration changed: %+v, want %+v", configurationAfter, configurationBefore)
+	}
+}
+
+// Scenario: AddNonvoter adds a new server, then the same server again with
+// the same address.
+// Expected: both calls succeed and the server is a non-voter.
+// Raft lesson: the voter check must not break the normal path. A repeated
+// AddNonvoter on a non-voter is harmless.
+func TestMembershipAddNonvoterTwiceIsAccepted(t *testing.T) {
+	cluster := New(t, Options{Timing: membershipTiming})
+	leader := cluster.WaitForLeader()
+	added := cluster.AddNode("node4")
+	address := added.Status().RaftAddress
+
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := leader.AddNonvoter(context.Background(), "node4", address); err != nil {
+			t.Fatalf("AddNonvoter attempt %d: %v", attempt, err)
+		}
+	}
+	if got := membershipSuffrages(t, leader)["node4"]; got != node.SuffrageNonvoter {
+		t.Fatalf("node4 suffrage = %q, want nonvoter", got)
+	}
+}

@@ -27,6 +27,12 @@ const (
 	MaxKeyBytes            = 512
 	MaxValueBytes          = 512 * 1024
 	MaxIdempotencyKeyBytes = 128
+	// MaxCommandBytes limits the encoded Raft entry. JSON writes <, >, & and
+	// control characters as 6 bytes, so a value at MaxValueBytes could make
+	// a 3 MiB entry. Twice MaxValueBytes leaves room for a plain value at the
+	// limit with the longest escaped keys (about 516 KiB), and for JSON text
+	// at the limit, where " and \ take 2 bytes.
+	MaxCommandBytes = 2 * MaxValueBytes
 )
 
 const (
@@ -156,7 +162,8 @@ type Node struct {
 	logger    hclog.Logger
 
 	// readyTerm is the term in which this node, as leader, finished its
-	// Barrier. Linearizable reads need readyTerm == the current term.
+	// Barrier. Linearizable and leader reads need readyTerm == the current
+	// term.
 	readyTerm     atomic.Uint64
 	leaderChanges chan bool
 
@@ -430,12 +437,34 @@ func (node *Node) Delete(ctx context.Context, key string, opts WriteOptions) (Wr
 	return node.apply(ctx, fsm.Command{Type: fsm.CommandDelete, Key: key, CASIndex: opts.CASIndex, IdempotencyKey: opts.IdempotencyKey})
 }
 
+// rejectUnlessLeader returns not_leader or no_leader on a node that is not the
+// leader. A follower answers Apply, membership changes and leadership
+// transfers with ErrNotLeader only from its main loop. While a slow disk
+// blocks that loop, these calls end with ErrEnqueueTimeout, and the HTTP
+// layer does not forward them. State() does not need the loop.
+func (node *Node) rejectUnlessLeader() error {
+	if node.raft.State() != raft.Leader {
+		return node.leaderInfo().notLeader(raft.ErrNotLeader)
+	}
+	return nil
+}
+
 // apply sends one command to raft and waits under the command deadline.
 // The errors are RejectedError (not applied), OutcomeUnknownError (may
 // commit) or ErrIdempotencyKeyReused (with the result).
 func (node *Node) apply(ctx context.Context, command fsm.Command) (WriteResult, error) {
 	data, err := fsm.EncodeCommand(command)
 	if err != nil {
+		return WriteResult{}, err
+	}
+	if len(data) > MaxCommandBytes {
+		return WriteResult{}, &ValidationError{
+			Field:    "value",
+			Message:  fmt.Sprintf("encodes to a Raft entry of %d bytes, the limit is %d bytes (JSON writes <, >, & and control characters as 6 bytes)", len(data), MaxCommandBytes),
+			TooLarge: true,
+		}
+	}
+	if err := node.rejectUnlessLeader(); err != nil {
 		return WriteResult{}, err
 	}
 	deadline := node.deadline(ctx)

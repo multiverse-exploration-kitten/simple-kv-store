@@ -7,23 +7,32 @@
 package tlsstream
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/raft"
 )
 
+// defaultHandshakeTimeout limits the TLS handshake of an inbound connection
+// (Consul's rpc_handshake_timeout). NetworkTransport sets no deadline on
+// inbound connections, so without it a client that connects and stays
+// silent keeps a socket and a goroutine forever.
+const defaultHandshakeTimeout = 5 * time.Second
+
 // StreamLayer listens and dials with one mutual-TLS config. Each node is a
 // TLS server for the peers that dial it and a TLS client when it dials them.
 type StreamLayer struct {
-	listener  net.Listener
-	advertise net.Addr
-	tlsConfig *tls.Config
+	listener         net.Listener
+	advertise        net.Addr
+	tlsConfig        *tls.Config
+	handshakeTimeout time.Duration
 }
 
 var _ raft.StreamLayer = (*StreamLayer)(nil)
@@ -41,9 +50,10 @@ func NewStreamLayer(bindAddress string, advertise net.Addr, tlsConfig *tls.Confi
 		return nil, err
 	}
 	layer := &StreamLayer{
-		listener:  tls.NewListener(tcpListener, tlsConfig),
-		advertise: advertise,
-		tlsConfig: tlsConfig,
+		listener:         tcpListener,
+		advertise:        advertise,
+		tlsConfig:        tlsConfig,
+		handshakeTimeout: defaultHandshakeTimeout,
 	}
 	if tcpAddress, isTCP := layer.Addr().(*net.TCPAddr); !isTCP || tcpAddress.IP == nil || tcpAddress.IP.IsUnspecified() {
 		_ = tcpListener.Close()
@@ -52,10 +62,17 @@ func NewStreamLayer(bindAddress string, advertise net.Addr, tlsConfig *tls.Confi
 	return layer, nil
 }
 
-// Accept returns a *tls.Conn. The handshake runs on the first Read, in the
-// connection goroutine of NetworkTransport, so a slow peer does not block the
-// accept loop.
-func (layer *StreamLayer) Accept() (net.Conn, error) { return layer.listener.Accept() }
+// Accept returns a TLS server connection. The handshake runs on the first
+// Read or Write, in the connection goroutine of NetworkTransport, so a slow
+// peer does not block the accept loop. A handshake that does not finish
+// within the handshake timeout closes the connection.
+func (layer *StreamLayer) Accept() (net.Conn, error) {
+	conn, err := layer.listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return &inboundConn{Conn: tls.Server(conn, layer.tlsConfig), handshakeTimeout: layer.handshakeTimeout}, nil
+}
 
 // Close stops the listener. NetworkTransport.Close calls it.
 func (layer *StreamLayer) Close() error { return layer.listener.Close() }
@@ -70,13 +87,17 @@ func (layer *StreamLayer) Addr() net.Addr {
 }
 
 // Dial opens a TCP connection and completes the TLS handshake. The timeout
-// covers the connect and the handshake together. The TLS server name is the
+// covers the connect and the handshake together. A timeout of 0 (raft's
+// "no I/O deadlines") uses the handshake timeout. The TLS server name is the
 // host of the dial address, so a peer certificate needs an IP SAN for an IP
 // address and a DNS SAN for a host name.
 func (layer *StreamLayer) Dial(address raft.ServerAddress, timeout time.Duration) (net.Conn, error) {
 	host, _, err := net.SplitHostPort(string(address))
 	if err != nil {
 		return nil, err
+	}
+	if timeout <= 0 {
+		timeout = layer.handshakeTimeout
 	}
 	config := layer.tlsConfig.Clone()
 	config.ServerName = host
@@ -107,4 +128,41 @@ func LoadMutualTLS(caFile, certFile, keyFile string) (*tls.Config, error) {
 		ClientCAs:    authorities, // checks the peer that dials this node
 		ClientAuth:   tls.RequireAndVerifyClientCert,
 	}, nil
+}
+
+// inboundConn runs the server handshake on the first Read or Write, under
+// handshakeTimeout. HandshakeContext closes the connection when the
+// deadline passes. After the handshake no deadline is left: raft keeps
+// pooled peer connections idle between RPCs.
+type inboundConn struct {
+	*tls.Conn
+	handshakeTimeout time.Duration
+	handshakeOnce    sync.Once
+	handshakeErr     error
+}
+
+func (conn *inboundConn) Read(buffer []byte) (int, error) {
+	if err := conn.handshake(); err != nil {
+		return 0, err
+	}
+	return conn.Conn.Read(buffer)
+}
+
+func (conn *inboundConn) Write(buffer []byte) (int, error) {
+	if err := conn.handshake(); err != nil {
+		return 0, err
+	}
+	return conn.Conn.Write(buffer)
+}
+
+func (conn *inboundConn) handshake() error {
+	conn.handshakeOnce.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), conn.handshakeTimeout)
+		defer cancel()
+		conn.handshakeErr = conn.Conn.HandshakeContext(ctx)
+		if errors.Is(conn.handshakeErr, context.DeadlineExceeded) {
+			conn.handshakeErr = fmt.Errorf("tlsstream: no TLS handshake from %s within %s: %w", conn.RemoteAddr(), conn.handshakeTimeout, conn.handshakeErr)
+		}
+	})
+	return conn.handshakeErr
 }

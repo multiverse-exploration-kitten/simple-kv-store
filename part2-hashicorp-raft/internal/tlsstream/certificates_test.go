@@ -157,3 +157,74 @@ func TestGenerateCertificatesRejectsBadIdentities(t *testing.T) {
 		})
 	}
 }
+
+// A node volume must hold only what the node needs: no CA key and no key of
+// another node.
+func TestExportNodeCertificatesCopiesOnlyWhatTheNodeNeeds(t *testing.T) {
+	caDir, exportDir := t.TempDir(), t.TempDir()
+	generate(t, caDir, loopbackIdentity("node1"), loopbackIdentity("node2"))
+	if err := tlsstream.ExportNodeCertificates(caDir, "node2", exportDir); err != nil {
+		t.Fatalf("ExportNodeCertificates: %v", err)
+	}
+
+	entries, err := os.ReadDir(exportDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	if want := []string{"ca.crt", "node2.crt", "node2.key"}; !slices.Equal(names, want) {
+		t.Fatalf("export dir has %v, want exactly %v", names, want)
+	}
+	certFile, keyFile := tlsstream.NodeCertificateFiles(caDir, "node2")
+	exportCertFile, exportKeyFile := tlsstream.NodeCertificateFiles(exportDir, "node2")
+	for from, to := range map[string]string{caPath(caDir): caPath(exportDir), certFile: exportCertFile, keyFile: exportKeyFile} {
+		if !bytes.Equal(readFile(t, from), readFile(t, to)) {
+			t.Errorf("%s differs from %s", to, from)
+		}
+	}
+	for path, wantMode := range map[string]os.FileMode{caPath(exportDir): 0o644, exportCertFile: 0o644, exportKeyFile: 0o600} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != wantMode {
+			t.Errorf("%s has mode %o, want %o", path, info.Mode().Perm(), wantMode)
+		}
+	}
+	if _, err := tlsstream.LoadMutualTLS(caPath(exportDir), exportCertFile, exportKeyFile); err != nil {
+		t.Fatalf("LoadMutualTLS from the export dir: %v", err)
+	}
+}
+
+// A second run replaces the files, so the node volume follows the CA dir
+// after a certificate rotation.
+func TestExportNodeCertificatesTwiceReplacesTheFiles(t *testing.T) {
+	caDir, exportDir := t.TempDir(), t.TempDir()
+	generate(t, caDir, loopbackIdentity("node1"))
+	if err := tlsstream.ExportNodeCertificates(caDir, "node1", exportDir); err != nil {
+		t.Fatalf("first export: %v", err)
+	}
+	certFile, _ := tlsstream.NodeCertificateFiles(caDir, "node1")
+	if err := os.Remove(certFile); err != nil {
+		t.Fatal(err)
+	}
+	generate(t, caDir, loopbackIdentity("node1")) // rotates node1
+	if err := tlsstream.ExportNodeCertificates(caDir, "node1", exportDir); err != nil {
+		t.Fatalf("second export: %v", err)
+	}
+	exportCertFile, _ := tlsstream.NodeCertificateFiles(exportDir, "node1")
+	if !bytes.Equal(readFile(t, certFile), readFile(t, exportCertFile)) {
+		t.Fatal("the second export kept the old certificate")
+	}
+}
+
+func TestExportNodeCertificatesOfAnUnknownNodeFails(t *testing.T) {
+	caDir, exportDir := t.TempDir(), t.TempDir()
+	generate(t, caDir, loopbackIdentity("node1"))
+	if err := tlsstream.ExportNodeCertificates(caDir, "node9", exportDir); err == nil {
+		t.Fatal("ExportNodeCertificates(node9) = nil, want an error: node9 has no key pair")
+	}
+}

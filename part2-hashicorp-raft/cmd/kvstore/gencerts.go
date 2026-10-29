@@ -13,13 +13,20 @@ import (
 
 // runGencerts creates the CA and one certificate per peer. The peer list has
 // the KV_PEERS format, so the init container and the nodes share one list.
-// A second run keeps the files that exist.
+// A second run keeps the files that exist. With -export-node it then copies
+// ca.crt and that node's key pair to -export-dir: the node's own volume,
+// without the CA key and the keys of the other nodes.
 func runGencerts(arguments []string) error {
 	flags := flag.NewFlagSet("gencerts", flag.ContinueOnError)
-	certificateDir := flags.String("dir", "/certs", "directory for ca.crt and the <id>.crt and <id>.key files")
+	certificateDir := flags.String("dir", "/certs", "directory for ca.crt, ca.key and the <id>.crt and <id>.key files")
 	peers := flags.String("peers", os.Getenv("KV_PEERS"), "id=host:port,... (default: $KV_PEERS)")
+	exportNode := flags.String("export-node", "", "copy ca.crt and the key pair of this node ID to -export-dir")
+	exportDir := flags.String("export-dir", "", "directory for the files of -export-node")
 	if err := flags.Parse(arguments); err != nil {
 		return err
+	}
+	if (*exportNode == "") != (*exportDir == "") {
+		return errors.New("-export-node and -export-dir go together")
 	}
 	identities, err := certificateIdentities(*peers)
 	if err != nil {
@@ -29,6 +36,13 @@ func runGencerts(arguments []string) error {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "certificates for %d nodes are in %s\n", len(identities), *certificateDir)
+	if *exportNode == "" {
+		return nil
+	}
+	if err := tlsstream.ExportNodeCertificates(*certificateDir, *exportNode, *exportDir); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "the files of %s are in %s\n", *exportNode, *exportDir)
 	return nil
 }
 

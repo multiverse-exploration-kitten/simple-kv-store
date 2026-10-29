@@ -98,6 +98,18 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 	}
 }
 
+// The idempotency fingerprint is a hash of the encoded bytes, and snapshots
+// store it. A node that encodes a command in another way (for example with
+// SetEscapeHTML(false), to make entries smaller) disagrees with the
+// fingerprints of older nodes during a rolling upgrade (Raft rule 2).
+func TestEncodeCommandBytesStayTheSame(t *testing.T) {
+	command := Command{Type: CommandPut, Key: "k", Value: "<a & b>\x00", CASIndex: casIndex(7), IdempotencyKey: "id"}
+	want := "\x01" + `{"key":"k","value":"\u003ca \u0026 b\u003e\u0000","cas_index":7,"idempotency_key":"id"}`
+	if got := string(encodeOrFail(t, command)); got != want {
+		t.Fatalf("EncodeCommand = %q, want %q", got, want)
+	}
+}
+
 func TestPutCreatesThenUpdatesEntry(t *testing.T) {
 	machine := New()
 	created := applyCommand(t, machine, 5, Command{Type: CommandPut, Key: "a", Value: "1"})

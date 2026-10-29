@@ -3,7 +3,9 @@
 package e2e
 
 import (
+	"fmt"
 	"net/http"
+	"slices"
 	"testing"
 	"time"
 )
@@ -29,6 +31,8 @@ func TestDockerCluster(t *testing.T) {
 		{"PausedFollowerCatchesUp", testPausedFollowerCatchesUp},
 		{"DisconnectedLeaderRejoinsAsFollower", testDisconnectedLeaderRejoinsAsFollower},
 		{"WithoutMajorityRequestsFailFast", testWithoutMajorityRequestsFailFast},
+		{"AdminCallNeedsTheToken", testAdminCallNeedsTheToken},
+		{"EachNodeMountsOnlyItsOwnCertificates", testEachNodeMountsOnlyItsOwnCertificates},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			t.Cleanup(func() { cluster.restore(t) })
@@ -242,4 +246,63 @@ func testWithoutMajorityRequestsFailFast(t *testing.T, cluster *dockerCluster) {
 	cluster.waitForLeader(t, services...)
 	cluster.mustPut(t, lastNode, key, "after")
 	requireValue(t, cluster.get(t, lastNode, key, "linearizable"), "after")
+}
+
+// testAdminCallNeedsTheToken:
+//
+// Scenario: send POST /admin/snapshot to a follower: without a token, with a
+// wrong token, and with the cluster's KV_ADMIN_TOKEN.
+//
+// Expected: 401, 401, then 200. The follower checks the token before it
+// forwards, and the leader checks the forwarded header again.
+//
+// Raft lesson: hashicorp/raft has no access control. Whoever can call
+// RemoveServer or TransferLeadership through the API can break the quorum
+// or move the leader. The application must guard these calls, and it must
+// fail closed when no token is set.
+func testAdminCallNeedsTheToken(t *testing.T, cluster *dockerCluster) {
+	leader, _ := cluster.waitForLeader(t, services...)
+	follower := others(services, leader)[0]
+	cluster.mustPut(t, leader, keyFor(t), "something to snapshot")
+
+	for _, attempt := range []struct {
+		authorization string
+		wantStatus    int
+	}{
+		{authorization: "", wantStatus: http.StatusUnauthorized},
+		{authorization: "Bearer wrong-" + cluster.adminToken, wantStatus: http.StatusUnauthorized},
+		{authorization: "Bearer " + cluster.adminToken, wantStatus: http.StatusOK},
+	} {
+		response, err := cluster.doWithAuthorization(http.MethodPost, follower, "/admin/snapshot", "", attempt.authorization)
+		if err != nil {
+			t.Fatalf("POST /admin/snapshot on %s: %v", follower, err)
+		}
+		if response.status != attempt.wantStatus {
+			t.Errorf("POST /admin/snapshot on %s with a token %t = %s, want %d", follower, attempt.authorization != "", response, attempt.wantStatus)
+		}
+	}
+}
+
+// testEachNodeMountsOnlyItsOwnCertificates:
+//
+// Scenario: list the volumes that each node container mounts.
+//
+// Expected: nodeN mounts only nodeN-data at /data and nodeN-certs at /certs.
+// No node mounts the CA volume (certs-ca) or the certificates of another
+// node.
+//
+// Raft lesson: mutual TLS is only as strong as the CA key. A node that can
+// read ca.key, or the key of another node, can show the certificate of any
+// peer and send that peer's Raft RPCs.
+func testEachNodeMountsOnlyItsOwnCertificates(t *testing.T, cluster *dockerCluster) {
+	for _, service := range services {
+		want := []string{
+			fmt.Sprintf("%s /data", cluster.volumeName(service+"-data")),
+			fmt.Sprintf("%s /certs", cluster.volumeName(service+"-certs")),
+		}
+		slices.Sort(want)
+		if got := cluster.mounts(t, service); !slices.Equal(got, want) {
+			t.Errorf("%s mounts %q, want exactly %q", service, got, want)
+		}
+	}
 }

@@ -46,7 +46,11 @@ type Command struct {
 	IdempotencyKey string  `json:"idempotency_key,omitempty"`
 }
 
-// EncodeCommand writes the type byte and then the JSON body.
+// EncodeCommand writes the type byte and then the JSON body. JSON escapes
+// '<', '>', '&' and control characters to 6 bytes each, so an entry can be
+// 6 times its input. Callers limit the encoded size. Keep the bytes for an
+// input the same: the idempotency fingerprint hashes them, and nodes of two
+// versions must agree on it.
 func EncodeCommand(command Command) ([]byte, error) {
 	body, err := json.Marshal(command)
 	if err != nil {

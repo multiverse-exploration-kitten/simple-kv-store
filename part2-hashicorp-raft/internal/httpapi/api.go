@@ -102,6 +102,12 @@ type Options struct {
 	// connect timeout is a dial error (nothing was sent), so the hold
 	// retries it. Default 1 s.
 	DialTimeout time.Duration
+	// AdminToken guards the calls that change the cluster or take a
+	// snapshot: POST /cluster/servers, DELETE /cluster/servers/{id}, POST
+	// /cluster/transfer-leadership and POST /admin/snapshot. They need the
+	// header "Authorization: Bearer <AdminToken>". Empty: these calls answer
+	// 403 (fail closed).
+	AdminToken string
 	// Logger default: no logs.
 	Logger hclog.Logger
 
@@ -157,10 +163,10 @@ func New(localNode NodeAPI, peers PeerDirectory, opts Options) http.Handler {
 	mux.HandleFunc("GET /health/ready", server.handleReady)
 	mux.HandleFunc("GET /health/leader", server.handleLeaderHealth)
 	mux.HandleFunc("GET /cluster/servers", server.handleListServers)
-	mux.HandleFunc("POST /cluster/servers", server.handleAddServer)
-	mux.HandleFunc("DELETE /cluster/servers/{id}", server.handleRemoveServer)
-	mux.HandleFunc("POST /cluster/transfer-leadership", server.handleTransferLeadership)
-	mux.HandleFunc("POST /admin/snapshot", server.handleSnapshot)
+	mux.HandleFunc("POST /cluster/servers", server.requireAdminToken(server.handleAddServer))
+	mux.HandleFunc("DELETE /cluster/servers/{id}", server.requireAdminToken(server.handleRemoveServer))
+	mux.HandleFunc("POST /cluster/transfer-leadership", server.requireAdminToken(server.handleTransferLeadership))
+	mux.HandleFunc("POST /admin/snapshot", server.requireAdminToken(server.handleSnapshot))
 	// The default registry. cmd/kvstore sets the go-metrics sink that fills it.
 	mux.Handle("GET /metrics", promhttp.Handler())
 	return mux

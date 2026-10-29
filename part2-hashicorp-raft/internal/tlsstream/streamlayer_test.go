@@ -44,8 +44,8 @@ type serverResult struct {
 	peerCommonName string
 }
 
-// serveOne accepts one connection, completes the TLS handshake and echoes
-// one byte.
+// serveOne accepts one connection and echoes one byte. The first Read runs
+// the TLS handshake, as in raft's NetworkTransport.
 func serveOne(layer *tlsstream.StreamLayer) <-chan serverResult {
 	results := make(chan serverResult, 1)
 	go func() {
@@ -55,20 +55,14 @@ func serveOne(layer *tlsstream.StreamLayer) <-chan serverResult {
 			return
 		}
 		defer conn.Close()
-		tlsConn := conn.(*tls.Conn)
-		ctx, cancel := context.WithTimeout(context.Background(), exchangeTimeout)
-		defer cancel()
-		if err := tlsConn.HandshakeContext(ctx); err != nil {
-			results <- serverResult{err: err}
-			return
-		}
-		peerCommonName := tlsConn.ConnectionState().PeerCertificates[0].Subject.CommonName
 		_ = conn.SetDeadline(time.Now().Add(exchangeTimeout))
 		buffer := make([]byte, 1)
 		if _, err := io.ReadFull(conn, buffer); err != nil {
-			results <- serverResult{err: err, peerCommonName: peerCommonName}
+			results <- serverResult{err: err}
 			return
 		}
+		state := conn.(interface{ ConnectionState() tls.ConnectionState }).ConnectionState()
+		peerCommonName := state.PeerCertificates[0].Subject.CommonName
 		_, err = conn.Write(buffer)
 		results <- serverResult{err: err, peerCommonName: peerCommonName}
 	}()

@@ -91,3 +91,40 @@ func readCertificate(t *testing.T, path string) *x509.Certificate {
 	}
 	return certificate
 }
+
+// The Docker init containers write the CA dir and copy one node's files into
+// that node's own volume.
+func TestGencertsExportsOneNodeIntoItsOwnDir(t *testing.T) {
+	caDir, exportDir := t.TempDir(), t.TempDir()
+	err := runGencerts([]string{"-dir", caDir, "-peers", "node1=127.0.0.1:7000,node2=127.0.0.2:7000", "-export-node", "node2", "-export-dir", exportDir})
+	if err != nil {
+		t.Fatalf("runGencerts: %v", err)
+	}
+	entries, err := os.ReadDir(exportDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	if want := []string{"ca.crt", "node2.crt", "node2.key"}; !slices.Equal(names, want) {
+		t.Fatalf("export dir has %v, want exactly %v", names, want)
+	}
+}
+
+func TestGencertsRejectsABadExport(t *testing.T) {
+	peers := "node1=127.0.0.1:7000"
+	for name, exportArguments := range map[string][]string{
+		"node without dir":  {"-export-node", "node1"},
+		"dir without node":  {"-export-dir", t.TempDir()},
+		"node not in peers": {"-export-node", "node9", "-export-dir", t.TempDir()},
+	} {
+		t.Run(name, func(t *testing.T) {
+			arguments := append([]string{"-dir", t.TempDir(), "-peers", peers}, exportArguments...)
+			if err := runGencerts(arguments); err == nil {
+				t.Fatalf("runGencerts(%v) = nil, want an error", arguments)
+			}
+		})
+	}
+}

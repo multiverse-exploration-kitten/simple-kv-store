@@ -63,6 +63,7 @@ func TestLoadReadsEveryVariable(t *testing.T) {
 		"KV_RAFT_TLS_KEY_FILE":  "/certs/node2-key.pem",
 		"KV_LOG_LEVEL":          "DEBUG",
 		"KV_LOG_JSON":           "true",
+		"KV_ADMIN_TOKEN":        " 5f2b-admin ",
 	}
 	loaded, err := Load(lookupFrom(environment))
 	if err != nil {
@@ -88,6 +89,7 @@ func TestLoadReadsEveryVariable(t *testing.T) {
 		RaftTLSKeyFile:   "/certs/node2-key.pem",
 		LogLevel:         "debug",
 		LogJSON:          true,
+		AdminToken:       "5f2b-admin",
 	}
 	if !reflect.DeepEqual(loaded, want) {
 		t.Fatalf("Load = %+v\nwant   %+v", loaded, want)

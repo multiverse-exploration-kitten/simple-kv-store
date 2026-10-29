@@ -63,6 +63,50 @@ func TestServeStopsCleanlyAndKeepsTheDataForTheNextStart(t *testing.T) {
 	}
 }
 
+// KV_ADMIN_TOKEN reaches the HTTP API: an admin call needs it.
+func TestServeGuardsAdminCallsWithTheToken(t *testing.T) {
+	raftAddress, httpAddress := freeAddress(t), freeAddress(t)
+	const adminToken = "serve-test-admin-token"
+	serverConfig, err := config.Load(mapLookup(map[string]string{
+		"KV_NODE_ID":                 "node1",
+		"KV_RAFT_ADDRESS":            raftAddress,
+		"KV_RAFT_BIND_ADDRESS":       raftAddress,
+		"KV_HTTP_ADDRESS":            httpAddress,
+		"KV_DATA_DIR":                t.TempDir(),
+		"KV_BOOTSTRAP":               "true",
+		"KV_PEERS":                   "node1=" + raftAddress,
+		"KV_RAFT_INSECURE_PLAINTEXT": "true",
+		"KV_ADMIN_TOKEN":             adminToken,
+	}))
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	baseURL := "http://" + httpAddress
+	client := &http.Client{Timeout: 10 * time.Second}
+	startServe(t, serverConfig)
+	waitForStatus(t, client, baseURL+"/health/leader", http.StatusOK)
+	if putResponse := request(t, client, http.MethodPut, baseURL+"/kv/a", `{"value":"1"}`); putResponse.status != http.StatusOK {
+		t.Fatalf("PUT /kv/a = %d %s, want 200", putResponse.status, putResponse.body)
+	}
+
+	if withoutToken := request(t, client, http.MethodPost, baseURL+"/admin/snapshot", ""); withoutToken.status != http.StatusUnauthorized {
+		t.Fatalf("POST /admin/snapshot without the token = %d %s, want 401", withoutToken.status, withoutToken.body)
+	}
+	snapshotRequest, err := http.NewRequest(http.MethodPost, baseURL+"/admin/snapshot", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotRequest.Header.Set("Authorization", "Bearer "+adminToken)
+	withToken, err := client.Do(snapshotRequest)
+	if err != nil {
+		t.Fatalf("POST /admin/snapshot with the token: %v", err)
+	}
+	_ = withToken.Body.Close()
+	if withToken.StatusCode != http.StatusOK {
+		t.Fatalf("POST /admin/snapshot with the token = %d, want 200", withToken.StatusCode)
+	}
+}
+
 // startServe runs serve in a goroutine. The returned stop function cancels
 // it, as SIGTERM does, and fails the test when serve returns an error or
 // does not return in time. It runs at most once.
@@ -156,5 +200,31 @@ func mapLookup(values map[string]string) func(string) (string, bool) {
 	return func(name string) (string, bool) {
 		value, found := values[name]
 		return value, found
+	}
+}
+
+// A held and then forwarded request must not be cut by the server. The write
+// deadline starts when the request header is read, so WriteTimeout must be
+// longer than the hold plus one forward. It follows the two values.
+func TestHTTPServerTimeoutsCoverTheHoldAndTheForward(t *testing.T) {
+	for _, timeouts := range []struct{ hold, forward time.Duration }{
+		{hold: 5 * time.Second, forward: 10 * time.Second},
+		{hold: 5 * time.Second, forward: 2 * time.Minute},
+	} {
+		server := newHTTPServer(http.NotFoundHandler(), timeouts.hold, timeouts.forward, hclog.NewNullLogger())
+		if server.ReadHeaderTimeout <= 0 || server.ReadTimeout < server.ReadHeaderTimeout || server.IdleTimeout <= 0 {
+			t.Errorf("hold %s forward %s: ReadHeaderTimeout %s, ReadTimeout %s, IdleTimeout %s: want all set, ReadTimeout >= ReadHeaderTimeout",
+				timeouts.hold, timeouts.forward, server.ReadHeaderTimeout, server.ReadTimeout, server.IdleTimeout)
+		}
+		if longest := timeouts.hold + timeouts.forward; server.WriteTimeout <= longest {
+			t.Errorf("hold %s forward %s: WriteTimeout %s, want more than %s", timeouts.hold, timeouts.forward, server.WriteTimeout, longest)
+		}
+		// The forward client of the peers keeps idle connections this long.
+		// The server must keep them longer, or a forward can go out on a
+		// connection that the server just closed.
+		clientIdle := http.DefaultTransport.(*http.Transport).IdleConnTimeout
+		if server.IdleTimeout <= clientIdle {
+			t.Errorf("IdleTimeout %s, want more than the forward client's %s", server.IdleTimeout, clientIdle)
+		}
 	}
 }

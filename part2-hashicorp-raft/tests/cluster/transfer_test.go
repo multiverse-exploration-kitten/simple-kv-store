@@ -110,3 +110,34 @@ func TestTransferLeadershipToChosenFollower(t *testing.T) {
 	}
 	t.Logf("puts to the old leader while the transfer ran: %v", counts)
 }
+
+// Scenario: the cluster has 3 voters and a caught-up non-voter. The leader is
+// asked to transfer leadership to the non-voter.
+// Expected: TransferLeadership returns a ValidationError (HTTP 400). The
+// leader stays leader in the same term and the non-voter stays a non-voter.
+// Raft lesson: hashicorp/raft (issue #727) accepts a transfer to a non-voter,
+// forces an election and reports success. The application must check the
+// suffrage itself before it calls raft.
+func TestTransferLeadershipToNonvoterIsRejected(t *testing.T) {
+	cluster := New(t, Options{Timing: membershipTiming})
+	leader := cluster.WaitForLeader()
+	added := cluster.AddNode("node4")
+	if err := leader.AddNonvoter(context.Background(), "node4", added.Status().RaftAddress); err != nil {
+		t.Fatal(err)
+	}
+	membershipWaitForCatchUp(t, leader, added)
+	termBefore := leader.Status().Term
+
+	err := leader.TransferLeadership(context.Background(), "node4")
+
+	var validationError *node.ValidationError
+	if !errors.As(err, &validationError) {
+		t.Fatalf("TransferLeadership to a non-voter = %v, want ValidationError", err)
+	}
+	if got := cluster.WaitForLeader(); got.ID() != leader.ID() || got.Status().Term != termBefore {
+		t.Fatalf("leadership changed: leader %s term %d, want %s term %d", got.ID(), got.Status().Term, leader.ID(), termBefore)
+	}
+	membershipCheckSuffrages(t, leader, map[string]string{
+		"node1": node.SuffrageVoter, "node2": node.SuffrageVoter, "node3": node.SuffrageVoter, "node4": node.SuffrageNonvoter,
+	})
+}

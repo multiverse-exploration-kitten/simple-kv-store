@@ -17,8 +17,9 @@ const (
 	// Linearizable is the default: the leader checks that it is still the
 	// leader (VerifyLeader) and that its FSM caught up in this term.
 	Linearizable ReadConsistency = "linearizable"
-	// LeaderLocal reads the leader's FSM without checks (Consul "default").
-	// An old leader that did not step down yet can return stale data.
+	// LeaderLocal reads the leader's FSM after its Barrier of the current
+	// term, without a quorum check (Consul "default"). An old leader that did
+	// not step down yet can return stale data.
 	LeaderLocal ReadConsistency = "leader"
 	// Stale reads the local FSM on any node. It works without a quorum and
 	// can be stale without a bound, unless MaxStale is set.
@@ -111,6 +112,11 @@ func (node *Node) checkRead(ctx context.Context, opts ReadOptions) (ReadMeta, er
 		if !node.IsLeader() {
 			return ReadMeta{}, node.leaderInfo().notLeader(nil)
 		}
+		// Before its Barrier, a new leader's FSM can miss writes that the
+		// old leader acknowledged.
+		if err := node.leaderReady(); err != nil {
+			return ReadMeta{}, err
+		}
 	case Stale:
 		if lastContact := node.lastContact(); opts.MaxStale > 0 && (lastContact == neverContacted || lastContact > opts.MaxStale) {
 			return ReadMeta{}, &RejectedError{Reason: ReasonTooStale}
@@ -128,19 +134,28 @@ func (node *Node) checkRead(ctx context.Context, opts ReadOptions) (ReadMeta, er
 	}, nil
 }
 
-// verifyLinearizable: this node is the leader, its Barrier of the current
-// term is done, and a quorum still accepts it (VerifyLeader). VerifyLeader
-// counts non-voters too (issue #725). The VerifyLeader call itself blocks
-// when raft's verify queue of 64 is full, so it runs under the deadline.
+// verifyLinearizable: this node is the leader, a quorum still accepts it
+// (VerifyLeader), and its Barrier is done in the same term as the verify.
+// VerifyLeader counts non-voters too (issue #725). The VerifyLeader call
+// itself blocks when raft's verify queue of 64 is full, so it runs under the
+// deadline.
 func (node *Node) verifyLinearizable(ctx context.Context) error {
 	if !node.IsLeader() {
 		return node.leaderInfo().notLeader(nil)
 	}
-	if err := node.leaderReady(); err != nil {
-		return err
+	term := node.raft.CurrentTerm()
+	// Fail fast: a leader before its Barrier needs no quorum round trip.
+	if node.readyTerm.Load() != term {
+		return &RejectedError{Reason: ReasonNotReady}
 	}
 	if _, err := waitForCall(ctx, node.deadline(ctx), node.raft.VerifyLeader); err != nil {
 		return translateReadError(err, node.leaderInfo())
+	}
+	// Check again after the verify, as Consul does. Leadership can move away
+	// and come back while the verify waits: then VerifyLeader passes in a
+	// later term whose Barrier is not done.
+	if node.readyTerm.Load() != term || node.raft.CurrentTerm() != term {
+		return &RejectedError{Reason: ReasonNotReady}
 	}
 	return nil
 }

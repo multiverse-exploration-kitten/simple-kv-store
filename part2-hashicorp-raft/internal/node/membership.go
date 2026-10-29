@@ -50,6 +50,14 @@ func (node *Node) AddNonvoter(ctx context.Context, id, address string) error {
 	if err := validateServer(id, address); err != nil {
 		return err
 	}
+	// raft.AddNonvoter on a voter keeps it a voter but rewrites its address.
+	existing, found, err := node.findServer(id)
+	if err != nil {
+		return err
+	}
+	if found && existing.Suffrage == SuffrageVoter {
+		return &ValidationError{Field: "id", Message: "server " + id + " is already a voter: it cannot be added as a non-voter"}
+	}
 	return node.changeMembership(ctx, func(enqueueTimeout time.Duration) raft.Future {
 		return node.raft.AddNonvoter(raft.ServerID(id), raft.ServerAddress(address), 0, enqueueTimeout)
 	})
@@ -69,6 +77,9 @@ func (node *Node) RemoveServer(ctx context.Context, id string) error {
 // changeMembership passes prevIndex 0: GetConfiguration().Index() is always
 // 0 in v1.8.0 (#722), so a real guard index is not available.
 func (node *Node) changeMembership(ctx context.Context, change func(enqueueTimeout time.Duration) raft.Future) error {
+	if err := node.rejectUnlessLeader(); err != nil {
+		return err
+	}
 	deadline := node.deadline(ctx)
 	enqueueTimeout := enqueueTimeoutFor(deadline)
 	if enqueueTimeout <= 0 || ctx.Err() != nil {
@@ -87,18 +98,25 @@ func (node *Node) TransferLeadership(ctx context.Context, targetID string) error
 	if targetID == node.config.NodeID {
 		return &ValidationError{Field: "id", Message: "cannot transfer leadership to this node itself"}
 	}
+	if err := node.rejectUnlessLeader(); err != nil {
+		return err
+	}
 	deadline := node.deadline(ctx)
 	transfer := node.raft.LeadershipTransfer
 	if targetID != "" {
-		targetAddress, found, err := node.serverAddress(targetID)
+		target, found, err := node.findServer(targetID)
 		if err != nil {
 			return err
 		}
 		if !found {
 			return &ValidationError{Field: "id", Message: "server " + targetID + " is not in the configuration"}
 		}
+		// raft accepts a non-voter target and forces an election (#727).
+		if target.Suffrage != SuffrageVoter {
+			return &ValidationError{Field: "id", Message: "server " + targetID + " must be a voter"}
+		}
 		transfer = func() raft.Future {
-			return node.raft.LeadershipTransferToServer(raft.ServerID(targetID), raft.ServerAddress(targetAddress))
+			return node.raft.LeadershipTransferToServer(raft.ServerID(targetID), raft.ServerAddress(target.Address))
 		}
 	}
 	if _, err := waitForCall(ctx, deadline, transfer); err != nil {
@@ -107,17 +125,17 @@ func (node *Node) TransferLeadership(ctx context.Context, targetID string) error
 	return nil
 }
 
-func (node *Node) serverAddress(id string) (address string, found bool, err error) {
+func (node *Node) findServer(id string) (server ServerInfo, found bool, err error) {
 	servers, err := node.Configuration()
 	if err != nil {
-		return "", false, err
+		return ServerInfo{}, false, err
 	}
-	for _, server := range servers {
-		if server.ID == id {
-			return server.Address, true, nil
+	for _, candidate := range servers {
+		if candidate.ID == id {
+			return candidate, true, nil
 		}
 	}
-	return "", false, nil
+	return ServerInfo{}, false, nil
 }
 
 func validateServer(id, address string) error {

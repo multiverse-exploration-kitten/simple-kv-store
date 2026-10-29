@@ -16,7 +16,7 @@ import (
 )
 
 func newTestAPI(fake *fakeNode) http.Handler {
-	return New(fake, PeerDirectory{}, Options{})
+	return New(fake, PeerDirectory{}, Options{AdminToken: testAdminToken})
 }
 
 func casIndex(value uint64) *uint64 { return &value }
@@ -459,7 +459,7 @@ func TestAddServerChoosesVoterOrNonvoter(t *testing.T) {
 			}
 			fake.addVoter, fake.addNonvoter = record("voter"), record("nonvoter")
 			body := fmt.Sprintf(`{"id":"node4","address":"127.0.0.1:7004","voter":%t}`, voter)
-			response := serveTest(t, newTestAPI(fake), "POST", "/cluster/servers", body, nil)
+			response := serveTest(t, newTestAPI(fake), "POST", "/cluster/servers", body, adminHeader())
 
 			wantSuffrage := map[bool]string{true: "voter", false: "nonvoter"}[voter]
 			if response.status != 200 || added != wantSuffrage+" node4 127.0.0.1:7004" || response.field("suffrage") != wantSuffrage || response.field("id") != "node4" {
@@ -470,7 +470,7 @@ func TestAddServerChoosesVoterOrNonvoter(t *testing.T) {
 }
 
 func TestAddServerRejectsInvalidJSONLocally(t *testing.T) {
-	response := serveTest(t, newTestAPI(newLeaderFake()), "POST", "/cluster/servers", `{"id":`, nil)
+	response := serveTest(t, newTestAPI(newLeaderFake()), "POST", "/cluster/servers", `{"id":`, adminHeader())
 	if response.status != 400 || response.field("field") != "body" {
 		t.Fatalf("status %d body %s", response.status, response.text)
 	}
@@ -483,7 +483,7 @@ func TestRemoveServer(t *testing.T) {
 		removed = id
 		return nil
 	}
-	response := serveTest(t, newTestAPI(fake), "DELETE", "/cluster/servers/node3", "", nil)
+	response := serveTest(t, newTestAPI(fake), "DELETE", "/cluster/servers/node3", "", adminHeader())
 	if response.status != 200 || removed != "node3" || response.field("status") != "ok" {
 		t.Fatalf("status %d body %s, removed %q", response.status, response.text, removed)
 	}
@@ -503,7 +503,7 @@ func TestTransferLeadershipTarget(t *testing.T) {
 				target = targetID
 				return nil
 			}
-			response := serveTest(t, newTestAPI(fake), "POST", "/cluster/transfer-leadership", test.body, nil)
+			response := serveTest(t, newTestAPI(fake), "POST", "/cluster/transfer-leadership", test.body, adminHeader())
 			if response.status != 200 || target != test.want {
 				t.Fatalf("status %d body %s, target %q, want %q", response.status, response.text, target, test.want)
 			}
@@ -534,7 +534,7 @@ func TestClusterCallErrorMapping(t *testing.T) {
 			fake.removeServer = func(context.Context, string) error { return test.err }
 			fake.transferLeadership = func(context.Context, string) error { return test.err }
 			for _, clusterCall := range calls {
-				response := serveTest(t, newTestAPI(fake), clusterCall.method, clusterCall.path, clusterCall.body, nil)
+				response := serveTest(t, newTestAPI(fake), clusterCall.method, clusterCall.path, clusterCall.body, adminHeader())
 				if response.status != test.wantStatus || response.field("reason") != test.wantReason {
 					t.Fatalf("%s %s: status %d body %s", clusterCall.method, clusterCall.path, response.status, response.text)
 				}
@@ -568,7 +568,7 @@ func TestSnapshot(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			fake := newLeaderFake()
 			fake.snapshot = func(context.Context) error { return test.err }
-			response := serveTest(t, newTestAPI(fake), "POST", "/admin/snapshot", "", nil)
+			response := serveTest(t, newTestAPI(fake), "POST", "/admin/snapshot", "", adminHeader())
 			if response.status != test.wantStatus || response.field("error") != test.wantError {
 				t.Fatalf("status %d body %s", response.status, response.text)
 			}

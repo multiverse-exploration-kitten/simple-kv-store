@@ -30,6 +30,15 @@ const (
 	// holdTimeout: how long the HTTP API waits for a leader before a 503.
 	holdTimeout       = 5 * time.Second
 	readHeaderTimeout = 10 * time.Second
+	// readTimeout limits reading the whole request: the header and a body
+	// of up to about 3 MiB. It does not limit the handler: net/http clears
+	// the read deadline when the handler has read the body.
+	readTimeout = 30 * time.Second
+	// idleTimeout is longer than the 90 s idle timeout of the forward client
+	// (http.DefaultTransport). So the client closes an idle connection
+	// first, and a forward never goes out on a connection that the server
+	// is closing.
+	idleTimeout = 2 * time.Minute
 )
 
 // runServe runs the node until SIGTERM or SIGINT.
@@ -102,22 +111,21 @@ func serve(ctx context.Context, serverConfig config.Config, logger hclog.Logger)
 	}
 	// The leader's own 504 must arrive before the forward gives up.
 	forwardTimeout := 2 * serverConfig.CommandTimeout
-	httpServer := &http.Server{
-		Handler: httpapi.New(kvNode, httpapi.PeerDirectory(serverConfig.PeerHTTP), httpapi.Options{
-			HoldTimeout:    holdTimeout,
-			ForwardTimeout: forwardTimeout,
-			Logger:         logger.Named("http"),
-		}),
-		ReadHeaderTimeout: readHeaderTimeout,
-		ErrorLog:          logger.Named("http").StandardLogger(&hclog.StandardLoggerOptions{InferLevels: true}),
-	}
+	handler := httpapi.New(kvNode, httpapi.PeerDirectory(serverConfig.PeerHTTP), httpapi.Options{
+		HoldTimeout:    holdTimeout,
+		ForwardTimeout: forwardTimeout,
+		AdminToken:     serverConfig.AdminToken,
+		Logger:         logger.Named("http"),
+	})
+	httpServer := newHTTPServer(handler, holdTimeout, forwardTimeout, logger.Named("http"))
 	serveResult := make(chan error, 1)
 	go func() { serveResult <- httpServer.Serve(listener) }()
 	logger.Info("started",
 		"raft_address", serverConfig.RaftAddress,
 		"http_address", listener.Addr().String(),
 		"bootstrap", serverConfig.Bootstrap,
-		"raft_tls", !serverConfig.RaftInsecurePlaintext)
+		"raft_tls", !serverConfig.RaftInsecurePlaintext,
+		"admin_calls", serverConfig.AdminToken != "")
 
 	select {
 	case <-ctx.Done():
@@ -130,6 +138,22 @@ func serve(ctx context.Context, serverConfig config.Config, logger hclog.Logger)
 		// A request can wait for a leader, then wait for the forward.
 		httpDrain: holdTimeout + forwardTimeout,
 	}, logger)
+}
+
+// newHTTPServer limits each step of a request, so a slow or silent client
+// cannot keep a connection and a goroutine forever. The write deadline
+// starts when the request header is read. It covers the body read (less
+// than readTimeout), the hold for a leader, one forward, and the answer.
+// Without that margin a held and forwarded request would be cut.
+func newHTTPServer(handler http.Handler, holdTimeout, forwardTimeout time.Duration, logger hclog.Logger) *http.Server {
+	return &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      readTimeout + holdTimeout + forwardTimeout,
+		IdleTimeout:       idleTimeout,
+		ErrorLog:          logger.StandardLogger(&hclog.StandardLoggerOptions{InferLevels: true}),
+	}
 }
 
 type shutdownTimeouts struct {

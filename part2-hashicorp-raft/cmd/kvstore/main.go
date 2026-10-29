@@ -12,7 +12,7 @@ import (
 	"os"
 )
 
-const usage = `usage: kvstore [serve | healthcheck | gencerts [-dir DIR] [-peers id=host:port,...]]`
+const usage = `usage: kvstore [serve | healthcheck | gencerts [-dir DIR] [-peers id=host:port,...] [-export-node ID -export-dir DIR]]`
 
 func main() {
 	subcommand, arguments := "serve", []string(nil)

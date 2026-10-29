@@ -149,14 +149,18 @@ func TestForwardSendsClusterAndAdminCallsWithoutLocalCall(t *testing.T) {
 		t.Run(clusterCall.method+" "+clusterCall.path, func(t *testing.T) {
 			leader := newFakeLeaderServer(t, answerJSON(200, `{"status":"ok"}`))
 			follower := newFollowerFake()
-			handler := New(follower, PeerDirectory{"node1": leader.server.URL}, Options{})
-			response := serveTest(t, handler, clusterCall.method, clusterCall.path, clusterCall.body, nil)
+			handler := New(follower, PeerDirectory{"node1": leader.server.URL}, Options{AdminToken: testAdminToken})
+			response := serveTest(t, handler, clusterCall.method, clusterCall.path, clusterCall.body, adminHeader())
 			if response.status != 200 {
 				t.Fatalf("status %d body %s", response.status, response.text)
 			}
 			received := leader.requests()
 			if len(received) != 1 || received[0].method != clusterCall.method || received[0].requestURI != clusterCall.path || received[0].body != clusterCall.body {
 				t.Fatalf("leader got %+v", received)
+			}
+			// The leader checks the admin token again.
+			if got := received[0].header.Get("Authorization"); got != "Bearer "+testAdminToken {
+				t.Fatalf("leader got Authorization %q, want the client's bearer token", got)
 			}
 			if follower.calls.Load() != 0 {
 				t.Fatalf("the follower called its node %d times, want 0", follower.calls.Load())

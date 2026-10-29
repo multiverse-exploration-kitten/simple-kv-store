@@ -27,6 +27,9 @@ x-kvstore-env: &kvstore-env
   KV_RAFT_TLS_CA_FILE: /certs/ca.crt
   KV_LOG_JSON: "true"
   KV_LOG_LEVEL: ${KV_LOG_LEVEL:-info}
+  # Guards the calls that change the cluster or take a snapshot. No default:
+  # `make up` writes a random token to .env (git-ignored).
+  KV_ADMIN_TOKEN: ${KV_ADMIN_TOKEN:?run make up, it writes a random token to .env}
 
 x-kvstore-node: &kvstore-node
   # No shared `image:` name. Compose 2.17 builds each service on its own and
@@ -34,9 +37,6 @@ x-kvstore-node: &kvstore-node
   build: .
   # The chaos commands and the e2e tests decide when a stopped node comes back.
   restart: "no"
-  depends_on:
-    certs:
-      condition: service_completed_successfully
   # SIGTERM: leadership transfer (up to KV_COMMAND_TIMEOUT), then the HTTP
   # drain (up to 15 s), then the raft shutdown. Docker's default 10 s is too short.
   stop_grace_period: 30s
@@ -48,21 +48,55 @@ x-kvstore-node: &kvstore-node
     retries: 10
     start_period: 10s
 
+# Certificates. The CA key and all key pairs stay in the volume certs-ca,
+# which no node mounts. Each certs-nodeN job creates the CA and the node
+# certificates once (a second run keeps them) and copies ca.crt and the key
+# pair of nodeN into the volume nodeN-certs. nodeN mounts only that volume.
+# The jobs run as nonroot (65532), as the nodes, so the nodes can read the
+# 0600 keys. The image has only /data and /certs as mount points that belong
+# to nonroot (a new volume takes the owner of its mount point), so the jobs
+# mount certs-ca at /data.
+x-certs-job: &certs-job
+  build: .
+  restart: "no"
+  environment:
+    KV_PEERS: *raft-peers
+  network_mode: none
+
 services:
-  # Creates the CA and the node certificates once. A second run keeps them.
-  # Same uid as the nodes (nonroot, 65532), so the nodes can read the 0600 keys.
-  certs:
-    build: .
-    restart: "no"
-    command: ["gencerts", "-dir", "/certs"]
-    environment:
-      KV_PEERS: *raft-peers
+  certs-node1:
+    <<: *certs-job
+    command: ["gencerts", "-dir", "/data", "-export-node", "node1", "-export-dir", "/certs"]
     volumes:
-      - certs:/certs
-    network_mode: none
+      - certs-ca:/data
+      - node1-certs:/certs
+
+  # certs-node1 creates the CA. Two jobs must not create it at the same time.
+  certs-node2:
+    <<: *certs-job
+    command: ["gencerts", "-dir", "/data", "-export-node", "node2", "-export-dir", "/certs"]
+    depends_on:
+      certs-node1:
+        condition: service_completed_successfully
+    volumes:
+      - certs-ca:/data
+      - node2-certs:/certs
+
+  certs-node3:
+    <<: *certs-job
+    command: ["gencerts", "-dir", "/data", "-export-node", "node3", "-export-dir", "/certs"]
+    depends_on:
+      certs-node1:
+        condition: service_completed_successfully
+    volumes:
+      - certs-ca:/data
+      - node3-certs:/certs
 
   node1:
     <<: *kvstore-node
+    depends_on:
+      certs-node1:
+        condition: service_completed_successfully
     environment:
       <<: *kvstore-env
       KV_NODE_ID: node1
@@ -73,13 +107,16 @@ services:
       - "${KV_NODE1_HTTP_PORT:-8101}:8000"
     volumes:
       - node1-data:/data
-      - certs:/certs:ro
+      - node1-certs:/certs:ro
     networks:
       raft:
         ipv4_address: ${KV_SUBNET_PREFIX:-172.28.11}.11
 
   node2:
     <<: *kvstore-node
+    depends_on:
+      certs-node2:
+        condition: service_completed_successfully
     environment:
       <<: *kvstore-env
       KV_NODE_ID: node2
@@ -90,13 +127,16 @@ services:
       - "${KV_NODE2_HTTP_PORT:-8102}:8000"
     volumes:
       - node2-data:/data
-      - certs:/certs:ro
+      - node2-certs:/certs:ro
     networks:
       raft:
         ipv4_address: ${KV_SUBNET_PREFIX:-172.28.11}.12
 
   node3:
     <<: *kvstore-node
+    depends_on:
+      certs-node3:
+        condition: service_completed_successfully
     environment:
       <<: *kvstore-env
       KV_NODE_ID: node3
@@ -107,7 +147,7 @@ services:
       - "${KV_NODE3_HTTP_PORT:-8103}:8000"
     volumes:
       - node3-data:/data
-      - certs:/certs:ro
+      - node3-certs:/certs:ro
     networks:
       raft:
         ipv4_address: ${KV_SUBNET_PREFIX:-172.28.11}.13
@@ -122,7 +162,10 @@ networks:
         - subnet: ${KV_SUBNET_PREFIX:-172.28.11}.0/24
 
 volumes:
-  certs:
+  certs-ca:
+  node1-certs:
+  node2-certs:
+  node3-certs:
   node1-data:
   node2-data:
   node3-data:

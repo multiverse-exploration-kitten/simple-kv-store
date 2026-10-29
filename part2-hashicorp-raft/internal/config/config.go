@@ -35,6 +35,9 @@ type Config struct {
 	RaftInsecurePlaintext bool
 	LogLevel              string // trace, debug, info, warn or error
 	LogJSON               bool
+	// AdminToken guards the HTTP calls that change the cluster or take a
+	// snapshot. Empty turns these calls off.
+	AdminToken string
 }
 
 const (
@@ -70,6 +73,7 @@ func Load(lookup func(name string) (string, bool)) (Config, error) {
 		RaftInsecurePlaintext: reader.boolean("KV_RAFT_INSECURE_PLAINTEXT"),
 		LogLevel:              reader.logLevel("KV_LOG_LEVEL"),
 		LogJSON:               reader.boolean("KV_LOG_JSON"),
+		AdminToken:            reader.value("KV_ADMIN_TOKEN", ""),
 	}
 	if !loaded.RaftInsecurePlaintext {
 		// Fail closed: Raft traffic without TLS needs an explicit opt-in.

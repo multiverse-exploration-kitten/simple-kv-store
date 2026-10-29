@@ -95,6 +95,37 @@ func GenerateCertificates(dir string, nodes []NodeIdentity) error {
 	return nil
 }
 
+// ExportNodeCertificates copies ca.crt and the key pair of the node called
+// name from dir (written by GenerateCertificates) to exportDir, with the
+// same file names and modes. exportDir then has what the node needs and no
+// other key. A second run replaces the files.
+func ExportNodeCertificates(dir, name, exportDir string) error {
+	if err := os.MkdirAll(exportDir, 0o755); err != nil {
+		return fmt.Errorf("tlsstream: create export dir: %w", err)
+	}
+	certFile, keyFile := NodeCertificateFiles(dir, name)
+	exportCertFile, exportKeyFile := NodeCertificateFiles(exportDir, name)
+	// The key before the certificate, as in GenerateCertificates.
+	copies := []struct {
+		from, to, blockType string
+		mode                os.FileMode
+	}{
+		{filepath.Join(dir, CACertificateFile), filepath.Join(exportDir, CACertificateFile), "CERTIFICATE", 0o644},
+		{keyFile, exportKeyFile, "PRIVATE KEY", 0o600},
+		{certFile, exportCertFile, "CERTIFICATE", 0o644},
+	}
+	for _, file := range copies {
+		der, err := readPEM(file.from, file.blockType)
+		if err != nil {
+			return err
+		}
+		if err := writePEMFile(file.to, file.blockType, der, file.mode); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func validateIdentity(identity NodeIdentity) error {
 	switch {
 	case !nodeNamePattern.MatchString(identity.Name):

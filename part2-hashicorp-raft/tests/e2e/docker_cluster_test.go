@@ -5,6 +5,8 @@
 package e2e
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -48,6 +50,9 @@ type dockerCluster struct {
 	composeFile string
 	environment []string
 	client      *http.Client
+	// adminToken is KV_ADMIN_TOKEN of this cluster. The process environment
+	// wins over .env, so the e2e cluster never uses the token of `make up`.
+	adminToken string
 }
 
 // startDockerCluster builds and starts the cluster and waits for a leader.
@@ -59,7 +64,8 @@ func startDockerCluster(t *testing.T) *dockerCluster {
 	if err != nil {
 		t.Fatalf("find the part directory: %v", err)
 	}
-	environment := append(os.Environ(), "KV_SUBNET_PREFIX="+subnetPrefix)
+	adminToken := randomToken(t)
+	environment := append(os.Environ(), "KV_SUBNET_PREFIX="+subnetPrefix, "KV_ADMIN_TOKEN="+adminToken)
 	for service, port := range httpPorts {
 		environment = append(environment, fmt.Sprintf("KV_%s_HTTP_PORT=%d", strings.ToUpper(service), port))
 	}
@@ -68,7 +74,8 @@ func startDockerCluster(t *testing.T) *dockerCluster {
 		composeFile: filepath.Join(partDir, "docker-compose.yml"),
 		environment: environment,
 		// No keep-alive: a pooled connection to a killed node would fail.
-		client: &http.Client{Timeout: requestTimeout, Transport: &http.Transport{DisableKeepAlives: true}},
+		client:     &http.Client{Timeout: requestTimeout, Transport: &http.Transport{DisableKeepAlives: true}},
+		adminToken: adminToken,
 	}
 	// Remove what an interrupted earlier run left behind.
 	cluster.compose(t, "down", "--volumes", "--remove-orphans")
@@ -84,6 +91,15 @@ func startDockerCluster(t *testing.T) *dockerCluster {
 	cluster.compose(t, "up", "--detach", "--build", "--wait")
 	cluster.waitForLeader(t, services...)
 	return cluster
+}
+
+func randomToken(t *testing.T) string {
+	t.Helper()
+	tokenBytes := make([]byte, 32)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		t.Fatalf("make an admin token: %v", err)
+	}
+	return hex.EncodeToString(tokenBytes)
 }
 
 // --- docker ---------------------------------------------------------------
@@ -115,6 +131,25 @@ func (cluster *dockerCluster) mustRun(t *testing.T, name string, arguments ...st
 }
 
 func (cluster *dockerCluster) networkName() string { return projectName + "_raft" }
+
+// volumeName is the Docker name of a volume in docker-compose.yml.
+func (cluster *dockerCluster) volumeName(volume string) string { return projectName + "_" + volume }
+
+// mounts returns "volume destination" for each volume that the container of
+// service mounts, sorted.
+func (cluster *dockerCluster) mounts(t *testing.T, service string) []string {
+	t.Helper()
+	template := `{{range .Mounts}}{{.Name}} {{.Destination}}{{"\n"}}{{end}}`
+	output := cluster.mustRun(t, "docker", "inspect", "--format", template, cluster.containerID(t, service))
+	var mounts []string
+	for line := range strings.SplitSeq(strings.TrimSpace(output), "\n") {
+		if line != "" {
+			mounts = append(mounts, line)
+		}
+	}
+	slices.Sort(mounts)
+	return mounts
+}
 
 func (cluster *dockerCluster) containerID(t *testing.T, service string) string {
 	t.Helper()
@@ -211,9 +246,17 @@ func (cluster *dockerCluster) url(service, path string) string {
 }
 
 func (cluster *dockerCluster) do(method, service, path, body string) (apiResponse, error) {
+	return cluster.doWithAuthorization(method, service, path, body, "")
+}
+
+// doWithAuthorization sends the Authorization header unless it is "".
+func (cluster *dockerCluster) doWithAuthorization(method, service, path, body, authorization string) (apiResponse, error) {
 	request, err := http.NewRequest(method, cluster.url(service, path), strings.NewReader(body))
 	if err != nil {
 		return apiResponse{}, err
+	}
+	if authorization != "" {
+		request.Header.Set("Authorization", authorization)
 	}
 	response, err := cluster.client.Do(request)
 	if err != nil {
