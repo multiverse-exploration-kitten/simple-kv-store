@@ -3,7 +3,7 @@
 ## Status
 
 - All phases done (1-7). Phase 7 added peer encryption (KV_RAFT_PASSWORD), not in the original list.
-- Tests: 56 unit + cluster (`uv run pytest`), 6 Docker e2e (`uv run pytest -m docker`). All pass.
+- Tests: 57 unit + cluster (`uv run pytest`), 6 Docker e2e (`uv run pytest -m docker`). All pass.
 - Code review done. Skipped on purpose: cached readiness, dev default peer password (both in README).
 - Docs: README, docs/lessons-from-tests.md, docs/pysyncobj-reference.md, ../docs/raft-in-production.md.
 - Next: part 2 (Go + hashicorp/raft) needs its own plan.
