@@ -1,6 +1,7 @@
 """Drive the Docker Compose cluster from tests: the docker CLI for faults, httpx for the API."""
 
 import os
+import secrets
 import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -61,6 +62,7 @@ class DockerCluster:
         self._subnet_prefix = subnet_prefix
         self._environment = {
             **os.environ,
+            "KV_RAFT_PASSWORD": secrets.token_hex(32),  # own random secret per test run
             "KV_SUBNET_PREFIX": subnet_prefix,
             **{
                 f"KV_{service.upper()}_HTTP_PORT": str(port) for service, port in http_ports.items()

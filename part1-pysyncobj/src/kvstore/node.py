@@ -83,7 +83,7 @@ class KeyValueNode:
         self, config: NodeConfig, transport_class: type[TCPTransport] = TCPTransport
     ) -> None:
         self._config = config
-        self._caught_up = False
+        self._last_ready_check_passed = False
         self._store = ReplicatedKeyValueStore()
         self._sync_obj = SyncObj(
             config.self_address,
@@ -134,24 +134,25 @@ class KeyValueNode:
         return bool(self._sync_obj.hasQuorum)
 
     def is_ready(self) -> bool:
-        """True when this node has applied every write that was committed before it started.
+        """True when this node can reach a working leader now and has applied every
+        committed write up to now.
 
         pysyncobj's isReady() alone is not enough. After a full cluster restart, a new leader
         reports its old saved commit index until it commits an entry in its own term. So a
         node can be "ready" and still miss committed writes. One linearizable read fixes it:
-        when the read returns, this node has applied every entry before it. The check can
-        block for up to the command timeout, so call it from health checks, not from /status.
+        when the read returns, this node has applied every entry before it. The read runs on
+        every check, not only once. So a node behind a lossy link (TCP open, has_quorum True)
+        stops being ready. Cost: one log entry per check. The check can block for up to the
+        command timeout, so call it from health checks, not from /status.
         """
-        if self._caught_up:
-            return True
-        if not self._sync_obj.isReady():
-            return False
-        try:
-            self._run_command(self._store.read, READY_BARRIER_KEY)
-        except KeyValueStoreError:
-            return False
-        self._caught_up = True
-        return True
+        ready = self._sync_obj.isReady()
+        if ready:
+            try:
+                self._run_command(self._store.read, READY_BARRIER_KEY)
+            except KeyValueStoreError:
+                ready = False
+        self._last_ready_check_passed = ready
+        return ready
 
     def status(self) -> dict[str, Any]:
         raw_status = self._read_raw_status()
@@ -169,7 +170,7 @@ class KeyValueNode:
             "leader": self.leader_address(),
             "term": raw_status["raft_term"],
             "has_quorum": bool(raw_status["has_quorum"]),
-            "ready": self._caught_up,  # set by the first successful is_ready() check
+            "ready": self._last_ready_check_passed,  # result of the last is_ready() check
             "commit_index": raw_status["commit_idx"],
             "last_applied": raw_status["last_applied"],
             "log_length": raw_status["log_len"],

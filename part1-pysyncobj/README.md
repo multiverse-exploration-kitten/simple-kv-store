@@ -124,7 +124,7 @@ A timeout is not a failure. The write can still commit later (test `test_write_t
 | `KV_PEERS` | empty | Comma list of all nodes. The node removes its own address from the list. |
 | `KV_BIND_ADDRESS` | same as `KV_SELF_ADDRESS` | The address to listen on. In Docker it is `0.0.0.0:4321`. |
 | `KV_DATA_DIR` | empty (memory only) | Folder for the journal and snapshot. Without it, a restart loses all data. |
-| `KV_RAFT_PASSWORD` | empty (no encryption). Compose default: `dev-only-change-me` | pysyncobj sends peer messages as pickles. Without a password, anyone who reaches port 4321 can run code on the node. With a password, pysyncobj encrypts and signs every peer message (Fernet). All nodes need the same value. Set your own secret outside local development. |
+| `KV_RAFT_PASSWORD` | empty (no encryption). Compose requires it and has no default. `make up` writes a random one to `.env` (git-ignored). | pysyncobj sends peer messages as pickles. Without a password, anyone who reaches port 4321 can run code on the node. With a password, pysyncobj encrypts and signs every peer message (Fernet). All nodes need the same value. To run `docker compose` without `make`, export the variable or create `.env` first. |
 | `KV_HTTP_HOST` | `0.0.0.0` | The HTTP listen address. |
 | `KV_HTTP_PORT` | `8000` | The HTTP listen port. |
 | `KV_COMMAND_TIMEOUT_SECONDS` | `3.0` | How long a command waits for a commit before it returns 504. It turns "hang forever" into an error. |

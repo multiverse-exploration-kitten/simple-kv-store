@@ -29,7 +29,7 @@ pysyncobj reports its old stored commit index until then, and a node that applie
 **Production.** Do not serve linearizable reads before the leader has committed an entry in its own term. Consul waits for a `Barrier()` after an election (study guide section 4).
 
 **This repo.** `KeyValueNode.is_ready()` calls `isReady()` and then does one linearizable read of a dummy key. When it returns, the node has applied every earlier entry.
-`/health/ready` runs this check and also needs a known leader and `has_quorum`. The result is cached in `_caught_up`, so `/status` shows a `ready` flag that is `false` until the first `/health/ready` call.
+`/health/ready` runs this check and also needs a known leader and `has_quorum`. The read runs on every check, so a node that loses its leader on an open but lossy link stops being ready (test `test_cut_off_follower_stops_being_ready`). Each check costs one log entry. `/status` shows the result of the last check, so its `ready` flag is `false` until the first `/health/ready` call.
 
 ## 3. No fsync (mmap journal)
 
@@ -193,7 +193,7 @@ With a password, pysyncobj encrypts and signs every peer message (Fernet, needs 
 
 **Production.** Authenticate peer traffic with mutual TLS (for example etcd `--peer-client-cert-auth`) and keep the Raft port on a private network.
 
-**This repo.** `KV_RAFT_PASSWORD` sets `raft_password`. `docker-compose.yml` sets the default `dev-only-change-me` for all 3 nodes. Use your own secret outside local development.
+**This repo.** `KV_RAFT_PASSWORD` sets `raft_password`. `docker-compose.yml` requires it and has no default, so a forgotten password stops the start instead of using a known one. `make up` writes a random password to `.env`. The e2e tests use their own random password.
 
 ## 17. A wrong password fails silently
 

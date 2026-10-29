@@ -7,8 +7,9 @@
 name: kvstore-part1
 
 x-kvstore-env: &kvstore-env
-  # All nodes need the same password. Set your own secret outside local development.
-  KV_RAFT_PASSWORD: ${KV_RAFT_PASSWORD:-dev-only-change-me}
+  # All nodes need the same password. No default: a known password lets anyone who reaches
+  # port 4321 send pickles and run code. `make up` writes a random one to .env.
+  KV_RAFT_PASSWORD: ${KV_RAFT_PASSWORD:?set KV_RAFT_PASSWORD, or run make up to create .env}
 
 x-kvstore-node: &kvstore-node
   # No shared `image:` name. Compose 2.17 builds each service on its own and adds a

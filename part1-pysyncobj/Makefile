@@ -64,39 +64,46 @@ test: ## Run the unit and cluster tests
 e2e: ## Run the e2e tests against their own Docker cluster
 	uv run pytest -m docker
 
-up: ## Build and start the 3-node cluster (HTTP on 8001-8003)
+# docker-compose.yml requires KV_RAFT_PASSWORD and has no default. Compose reads it from
+# .env (git-ignored). The first Docker target writes a random password there, so the
+# cluster never runs with a password that is known from the repo.
+.env:
+	@uv run python -c "import secrets; print('KV_RAFT_PASSWORD=' + secrets.token_hex(32))" > $@
+	@echo "Wrote a random KV_RAFT_PASSWORD to .env"
+
+up: .env ## Build and start the 3-node cluster (HTTP on 8001-8003)
 	docker compose up -d --build --wait
 
-down: ## Stop the cluster and delete its data volumes
+down: .env ## Stop the cluster and delete its data volumes
 	docker compose down -v
 
-logs: ## Follow the logs (all nodes, or one node with NODE=nodeN)
+logs: .env ## Follow the logs (all nodes, or one node with NODE=nodeN)
 	docker compose logs --follow --tail 100 $(NODE)
 
 status: ## Print the Raft status of each node, one line each
 	@uv run python -c "$$CLUSTER_SCRIPT" status
 
-kill-leader: ## Kill the current leader with SIGKILL
+kill-leader: .env ## Kill the current leader with SIGKILL
 	@leader=$$(uv run python -c "$$CLUSTER_SCRIPT" leader) \
 		&& echo "Killing the leader $$leader" \
 		&& docker compose kill --signal SIGKILL $$leader
 
-partition: ## Cut NODE off the Raft network, for example: make partition NODE=node1
+partition: .env ## Cut NODE off the Raft network, for example: make partition NODE=node1
 	$(require_node)
 	docker network disconnect $(RAFT_NETWORK) $(NODE_CONTAINER)
 
-heal: ## Connect NODE again with its static IP and DNS name, for example: make heal NODE=node1
+heal: .env ## Connect NODE again with its static IP and DNS name, for example: make heal NODE=node1
 	$(require_node)
 	docker network connect --ip $(NODE_IP) --alias $(NODE) $(RAFT_NETWORK) $(NODE_CONTAINER)
 
-pause: ## Freeze NODE (docker pause), for example: make pause NODE=node2
+pause: .env ## Freeze NODE (docker pause), for example: make pause NODE=node2
 	$(require_node)
 	docker compose pause $(NODE)
 
-unpause: ## Unfreeze NODE, for example: make unpause NODE=node2
+unpause: .env ## Unfreeze NODE, for example: make unpause NODE=node2
 	$(require_node)
 	docker compose unpause $(NODE)
 
-start: ## Start a stopped or killed NODE, for example: make start NODE=node1
+start: .env ## Start a stopped or killed NODE, for example: make start NODE=node1
 	$(require_node)
 	docker compose start $(NODE)

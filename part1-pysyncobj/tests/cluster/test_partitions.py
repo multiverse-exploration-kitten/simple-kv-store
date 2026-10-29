@@ -140,3 +140,23 @@ def test_rejoining_follower_with_a_higher_term_disrupts_the_leader(cluster: Clus
     assert final_leader is not rejoining_follower
     assert healthy_leader.status()["term"] > leader_term
     cluster.wait_for_value_everywhere("written-while-isolated", "yes")
+
+
+def test_cut_off_follower_stops_being_ready(cluster: Cluster):
+    """
+    Scenario: a follower passes the readiness check. Then cut it off from both peers.
+    The fault transport keeps TCP open, so has_quorum stays True, like packet loss.
+    Expected: the follower stops being ready. After heal, it is ready again.
+    Raft lesson: readiness must be checked again and again, not cached. A load balancer
+    that trusts an old "ready" keeps sending reads to a node whose data falls behind.
+    """
+    leader = cluster.wait_for_leader()
+    follower = cluster.followers(leader)[0]
+    wait_until(follower.is_ready, "the follower is ready")
+
+    cluster.isolate(follower)
+    assert follower.has_quorum(), "the fault transport should keep TCP connections open"
+    wait_until(lambda: not follower.is_ready(), "the cut-off follower is not ready")
+
+    cluster.heal()
+    wait_until(follower.is_ready, "the healed follower is ready again")
