@@ -10,8 +10,8 @@ import (
 // Configuration returns the latest Raft configuration. It may not be
 // committed yet (reference Q9).
 func (node *Node) Configuration() ([]ServerInfo, error) {
-	future := node.raft.GetConfiguration()
-	if err := waitForFuture(node.lifetime, future, time.Now().Add(node.config.CommandTimeout)); err != nil {
+	future, err := waitForCall(node.lifetime, time.Now().Add(node.config.CommandTimeout), node.raft.GetConfiguration)
+	if err != nil {
 		return nil, translateReadError(err, node.leaderInfo())
 	}
 	servers := future.Configuration().Servers
@@ -70,11 +70,11 @@ func (node *Node) RemoveServer(ctx context.Context, id string) error {
 // 0 in v1.8.0 (#722), so a real guard index is not available.
 func (node *Node) changeMembership(ctx context.Context, change func(enqueueTimeout time.Duration) raft.Future) error {
 	deadline := node.deadline(ctx)
-	enqueueTimeout := time.Until(deadline)
+	enqueueTimeout := enqueueTimeoutFor(deadline)
 	if enqueueTimeout <= 0 || ctx.Err() != nil {
 		return &RejectedError{Reason: ReasonEnqueueTimeout, cause: context.Cause(ctx)}
 	}
-	if err := waitForFuture(ctx, change(enqueueTimeout), deadline); err != nil {
+	if _, err := waitForCall(ctx, deadline, func() raft.Future { return change(enqueueTimeout) }); err != nil {
 		return translateWriteError(err, node.leaderInfo())
 	}
 	return nil
@@ -88,10 +88,8 @@ func (node *Node) TransferLeadership(ctx context.Context, targetID string) error
 		return &ValidationError{Field: "id", Message: "cannot transfer leadership to this node itself"}
 	}
 	deadline := node.deadline(ctx)
-	var future raft.Future
-	if targetID == "" {
-		future = node.raft.LeadershipTransfer()
-	} else {
+	transfer := node.raft.LeadershipTransfer
+	if targetID != "" {
 		targetAddress, found, err := node.serverAddress(targetID)
 		if err != nil {
 			return err
@@ -99,9 +97,11 @@ func (node *Node) TransferLeadership(ctx context.Context, targetID string) error
 		if !found {
 			return &ValidationError{Field: "id", Message: "server " + targetID + " is not in the configuration"}
 		}
-		future = node.raft.LeadershipTransferToServer(raft.ServerID(targetID), raft.ServerAddress(targetAddress))
+		transfer = func() raft.Future {
+			return node.raft.LeadershipTransferToServer(raft.ServerID(targetID), raft.ServerAddress(targetAddress))
+		}
 	}
-	if err := waitForFuture(ctx, future, deadline); err != nil {
+	if _, err := waitForCall(ctx, deadline, transfer); err != nil {
 		return translateWriteError(err, node.leaderInfo())
 	}
 	return nil

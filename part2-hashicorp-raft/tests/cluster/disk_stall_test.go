@@ -118,7 +118,8 @@ func diskStallHoldsFor(t *testing.T, window time.Duration, invariant func() erro
 // election timeouts. Then the disk recovers.
 // Expected (observed with hashicorp/raft v1.8.0):
 //   - The first write is enqueued and fails at CommandTimeout with
-//     OutcomeUnknownError (504). The next write fails at CommandTimeout too.
+//     OutcomeUnknownError (504). The next write cannot enter the log. It fails
+//     earlier with RejectedError{enqueue_timeout} (503), see TestDeadline.
 //   - A linearizable read fails at CommandTimeout with RejectedError (503).
 //   - No election starts. The stalled node stays leader in the same term,
 //     both followers still name it, and every node reports Ready.

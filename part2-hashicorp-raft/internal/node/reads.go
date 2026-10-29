@@ -130,7 +130,8 @@ func (node *Node) checkRead(ctx context.Context, opts ReadOptions) (ReadMeta, er
 
 // verifyLinearizable: this node is the leader, its Barrier of the current
 // term is done, and a quorum still accepts it (VerifyLeader). VerifyLeader
-// counts non-voters too (issue #725).
+// counts non-voters too (issue #725). The VerifyLeader call itself blocks
+// when raft's verify queue of 64 is full, so it runs under the deadline.
 func (node *Node) verifyLinearizable(ctx context.Context) error {
 	if !node.IsLeader() {
 		return node.leaderInfo().notLeader(nil)
@@ -138,7 +139,7 @@ func (node *Node) verifyLinearizable(ctx context.Context) error {
 	if err := node.leaderReady(); err != nil {
 		return err
 	}
-	if err := waitForFuture(ctx, node.raft.VerifyLeader(), node.deadline(ctx)); err != nil {
+	if _, err := waitForCall(ctx, node.deadline(ctx), node.raft.VerifyLeader); err != nil {
 		return translateReadError(err, node.leaderInfo())
 	}
 	return nil

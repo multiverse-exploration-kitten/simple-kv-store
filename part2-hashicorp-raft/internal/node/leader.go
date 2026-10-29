@@ -34,7 +34,7 @@ func (node *Node) establishLeadership() {
 		// leadership in between, the stored term is old and stays not ready.
 		term := node.raft.CurrentTerm()
 		deadline := time.Now().Add(node.config.CommandTimeout)
-		err := waitForFuture(node.lifetime, node.raft.Barrier(node.config.CommandTimeout), deadline)
+		_, err := waitForCall(node.lifetime, deadline, func() raft.Future { return node.raft.Barrier(enqueueTimeoutFor(deadline)) })
 		if err == nil {
 			node.readyTerm.Store(term)
 			node.logger.Info("leader is ready for linearizable reads", "term", term)

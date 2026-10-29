@@ -3,11 +3,8 @@ package node
 import (
 	"errors"
 	"fmt"
-	"path/filepath"
 
 	"github.com/hashicorp/raft"
-	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
-	"go.etcd.io/bbolt"
 
 	"github.com/multiverse-exploration-kitten/simple-kv-store/part2-hashicorp-raft/internal/fsm"
 )
@@ -34,28 +31,17 @@ func RecoverCluster(cfg Config, deps Dependencies, servers []Server) (err error)
 		return err
 	}
 
-	// The same file and open timeout as New. The timeout makes the call fail
-	// instead of waiting forever while a node still runs on this data dir.
-	boltStore, err := raftboltdb.New(raftboltdb.Options{
-		Path:        filepath.Join(cfg.DataDir, "raft.db"),
-		BoltOptions: &bbolt.Options{Timeout: boltOpenTimeout},
-	})
+	// The same stores as New. The open timeout makes the call fail instead of
+	// waiting forever while a node still runs on this data dir.
+	stores, err := openStores(cfg, deps)
 	if err != nil {
-		return fmt.Errorf("node: open raft.db: %w", err)
+		return err
 	}
 	defer func() {
-		if closeErr := boltStore.Close(); closeErr != nil {
+		if closeErr := stores.boltStore.Close(); closeErr != nil {
 			err = errors.Join(err, fmt.Errorf("node: close raft.db: %w", closeErr))
 		}
 	}()
-	var logStore raft.LogStore = boltStore
-	if deps.WrapLogStore != nil {
-		logStore = deps.WrapLogStore(logStore)
-	}
-	snapshots, err := raft.NewFileSnapshotStoreWithLogger(cfg.DataDir, cfg.Snapshots.Retain, cfg.Logger.Named("snapshot"))
-	if err != nil {
-		return fmt.Errorf("node: snapshot store: %w", err)
-	}
 
 	configuration := raft.Configuration{}
 	for _, server := range servers {
@@ -67,7 +53,7 @@ func RecoverCluster(cfg Config, deps Dependencies, servers []Server) (err error)
 	}
 	// raft applies the whole log to this FSM only to write the new snapshot.
 	// New restores its own fresh FSM from that snapshot.
-	err = raft.RecoverCluster(buildRaftConfig(cfg, nil), fsm.New(), logStore, boltStore, snapshots, deps.Transport, configuration)
+	err = raft.RecoverCluster(buildRaftConfig(cfg, nil), fsm.New(), stores.logStore, stores.boltStore, stores.snapshots, deps.Transport, configuration)
 	if err != nil {
 		return fmt.Errorf("node: recover cluster: %w", err)
 	}

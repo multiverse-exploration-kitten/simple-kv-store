@@ -116,7 +116,8 @@ type Config struct {
 	InitialServers []Server
 	Timing         Timing
 	Snapshots      SnapshotPolicy
-	// CommandTimeout limits every wait on raft, enqueue included.
+	// CommandTimeout limits every wait on raft, enqueue included. A new log
+	// entry gets half of it to enter the log.
 	CommandTimeout time.Duration
 	// ReadyMaxLastContact: a follower is ready when it heard from the leader
 	// within this time.
@@ -182,45 +183,66 @@ func New(cfg Config, deps Dependencies) (*Node, error) {
 		return nil, fmt.Errorf("node: create data dir: %w", err)
 	}
 
-	// NoSync stays false: every StoreLogs fsyncs before raft acknowledges.
-	boltStore, err := raftboltdb.New(raftboltdb.Options{
-		Path:        filepath.Join(cfg.DataDir, "raft.db"),
-		BoltOptions: &bbolt.Options{Timeout: boltOpenTimeout},
-	})
+	stores, err := openStores(cfg, deps)
 	if err != nil {
-		return nil, fmt.Errorf("node: open raft.db: %w", err)
+		return nil, err
 	}
-	created, err := start(cfg, deps, boltStore)
+	created, err := start(cfg, deps, stores)
 	if err != nil {
-		_ = boltStore.Close()
+		_ = stores.boltStore.Close()
 		return nil, err
 	}
 	return created, nil
 }
 
-func start(cfg Config, deps Dependencies, boltStore *raftboltdb.BoltStore) (*Node, error) {
+// raftStores are the stores of one data dir. logStore is the BoltDB store
+// behind deps.WrapLogStore, without a LogCache.
+type raftStores struct {
+	boltStore *raftboltdb.BoltStore
+	logStore  raft.LogStore
+	snapshots *raft.FileSnapshotStore
+}
+
+// openStores opens <DataDir>/raft.db and the file snapshot store in DataDir,
+// for New and RecoverCluster. On error it closes what it opened.
+func openStores(cfg Config, deps Dependencies) (raftStores, error) {
+	// NoSync stays false: every StoreLogs fsyncs before raft acknowledges.
+	// The open timeout makes the call fail instead of waiting forever while
+	// a running node holds the raft.db lock.
+	boltStore, err := raftboltdb.New(raftboltdb.Options{
+		Path:        filepath.Join(cfg.DataDir, "raft.db"),
+		BoltOptions: &bbolt.Options{Timeout: boltOpenTimeout},
+	})
+	if err != nil {
+		return raftStores{}, fmt.Errorf("node: open raft.db: %w", err)
+	}
+	snapshots, err := raft.NewFileSnapshotStoreWithLogger(cfg.DataDir, cfg.Snapshots.Retain, cfg.Logger.Named("snapshot"))
+	if err != nil {
+		_ = boltStore.Close()
+		return raftStores{}, fmt.Errorf("node: snapshot store: %w", err)
+	}
 	var logStore raft.LogStore = boltStore
 	if deps.WrapLogStore != nil {
 		logStore = deps.WrapLogStore(logStore)
 	}
-	cachedLogStore, err := raft.NewLogCache(logCacheEntries, logStore)
+	return raftStores{boltStore: boltStore, logStore: logStore, snapshots: snapshots}, nil
+}
+
+func start(cfg Config, deps Dependencies, stores raftStores) (*Node, error) {
+	cachedLogStore, err := raft.NewLogCache(logCacheEntries, stores.logStore)
 	if err != nil {
 		return nil, fmt.Errorf("node: log cache: %w", err)
-	}
-	snapshots, err := raft.NewFileSnapshotStoreWithLogger(cfg.DataDir, cfg.Snapshots.Retain, cfg.Logger.Named("snapshot"))
-	if err != nil {
-		return nil, fmt.Errorf("node: snapshot store: %w", err)
 	}
 
 	leaderChanges := make(chan bool, leaderNotifyBuffer)
 	raftConfig := buildRaftConfig(cfg, leaderChanges)
 	if cfg.Bootstrap {
-		if err := bootstrapIfNew(cfg, raftConfig, cachedLogStore, boltStore, snapshots, deps.Transport); err != nil {
+		if err := bootstrapIfNew(cfg, raftConfig, cachedLogStore, stores.boltStore, stores.snapshots, deps.Transport); err != nil {
 			return nil, err
 		}
 	}
 	machine := fsm.New()
-	raftNode, err := raft.NewRaft(raftConfig, machine, cachedLogStore, boltStore, snapshots, deps.Transport)
+	raftNode, err := raft.NewRaft(raftConfig, machine, cachedLogStore, stores.boltStore, stores.snapshots, deps.Transport)
 	if err != nil {
 		return nil, fmt.Errorf("node: start raft: %w", err)
 	}
@@ -230,7 +252,7 @@ func start(cfg Config, deps Dependencies, boltStore *raftboltdb.BoltStore) (*Nod
 		config:        cfg,
 		raft:          raftNode,
 		fsm:           machine,
-		boltStore:     boltStore,
+		boltStore:     stores.boltStore,
 		transport:     deps.Transport,
 		logger:        cfg.Logger,
 		leaderChanges: leaderChanges,
@@ -244,7 +266,7 @@ func start(cfg Config, deps Dependencies, boltStore *raftboltdb.BoltStore) (*Nod
 	}()
 	go func() {
 		defer created.backgroundWork.Done()
-		boltStore.RunMetrics(lifetime, 0) // freelist gauges; the global metrics sink is a no-op unless cmd sets one
+		stores.boltStore.RunMetrics(lifetime, 0) // freelist gauges; the global metrics sink is a no-op unless cmd sets one
 	}()
 	return created, nil
 }
@@ -417,17 +439,29 @@ func (node *Node) apply(ctx context.Context, command fsm.Command) (WriteResult, 
 		return WriteResult{}, err
 	}
 	deadline := node.deadline(ctx)
-	enqueueTimeout := time.Until(deadline)
+	enqueueTimeout := enqueueTimeoutFor(deadline)
 	if enqueueTimeout <= 0 || ctx.Err() != nil {
 		return WriteResult{}, &RejectedError{Reason: ReasonEnqueueTimeout, cause: context.Cause(ctx)}
 	}
 	// Apply's timeout limits only the enqueue (reference Q2).
-	future := node.raft.Apply(data, enqueueTimeout)
-	if err := waitForFuture(ctx, future, deadline); err != nil {
+	future, err := waitForCall(ctx, deadline, func() raft.ApplyFuture { return node.raft.Apply(data, enqueueTimeout) })
+	if err != nil {
 		return WriteResult{}, translateWriteError(err, node.leaderInfo())
 	}
 	result := future.Response().(fsm.ApplyResult)
 	return result, result.Err
+}
+
+// enqueueTimeoutFor gives raft half of the time until the deadline to take a
+// new log entry. Only raft's ErrEnqueueTimeout tells that the entry never
+// entered the log (503). With the whole budget, our deadline fires first and
+// the answer is "outcome unknown" (504). Half leaves a gap far bigger than
+// scheduling pauses (230 ms under -race load), and half the budget for
+// replication and fsync. An entry that waited longer would rarely commit.
+// The result is 0 or less when the deadline is too near: then do not call
+// raft, because raft reads 0 as "no timeout".
+func enqueueTimeoutFor(deadline time.Time) time.Duration {
+	return time.Until(deadline) / 2
 }
 
 // deadline is now + CommandTimeout, or the context deadline if sooner.
@@ -439,38 +473,50 @@ func (node *Node) deadline(ctx context.Context) time.Time {
 	return deadline
 }
 
-// waitForFuture calls future.Error() in a goroutine and stops waiting at the
-// deadline or when ctx ends. raft futures have no deadline of their own. The
-// goroutine stays until raft answers; that is one small goroutine per stuck
-// call (reference Q3).
-func waitForFuture(ctx context.Context, future raft.Future, deadline time.Time) error {
-	result := make(chan error, 1)
-	go func() { result <- future.Error() }()
+// callAnswer is the future of a raft call and the result of its Error().
+type callAnswer[FutureType raft.Future] struct {
+	future FutureType
+	err    error
+}
+
+// waitForCall runs call and then future.Error() in one goroutine, and stops
+// waiting at the deadline or when ctx ends. raft futures have no deadline of
+// their own (reference Q3). Some raft calls also block before they return a
+// future: VerifyLeader when its queue of 64 is full, Snapshot while an
+// earlier snapshot waits for the main loop. So the call runs in the goroutine
+// too. The goroutine stays until raft answers: one small goroutine per stuck
+// call. The future is the zero value when the error is errWaitDeadline.
+func waitForCall[FutureType raft.Future](ctx context.Context, deadline time.Time, call func() FutureType) (FutureType, error) {
+	answers := make(chan callAnswer[FutureType], 1)
+	go func() {
+		future := call()
+		answers <- callAnswer[FutureType]{future: future, err: future.Error()}
+	}()
 	timer := time.NewTimer(time.Until(deadline))
 	defer timer.Stop()
 	select {
-	case err := <-result:
-		return err
+	case answer := <-answers:
+		return answer.future, answer.err
 	case <-timer.C:
 	case <-ctx.Done():
 	}
-	// An answer that came at the same moment as the deadline still counts:
-	// for example ErrEnqueueTimeout after an enqueue that used the whole budget.
+	// An answer that came at the same moment as the deadline still counts.
 	select {
-	case err := <-result:
-		return err
+	case answer := <-answers:
+		return answer.future, answer.err
 	default:
 	}
+	var noFuture FutureType
 	if ctx.Err() != nil {
-		return fmt.Errorf("%w: %w", errWaitDeadline, context.Cause(ctx))
+		return noFuture, fmt.Errorf("%w: %w", errWaitDeadline, context.Cause(ctx))
 	}
-	return errWaitDeadline
+	return noFuture, errWaitDeadline
 }
 
 // Snapshot takes a user snapshot now. raft writes one even when nothing is
 // new since the last one (storage doc Q4).
 func (node *Node) Snapshot(ctx context.Context) error {
-	err := waitForFuture(ctx, node.raft.Snapshot(), node.deadline(ctx))
+	_, err := waitForCall(ctx, node.deadline(ctx), node.raft.Snapshot)
 	switch {
 	case err == nil:
 		return nil
