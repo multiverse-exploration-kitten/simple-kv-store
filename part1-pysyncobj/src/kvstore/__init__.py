@@ -1,2 +1,1 @@
-def main() -> None:
-    print("Hello from kvstore!")
+"""A replicated key-value store on Raft (pysyncobj)."""
