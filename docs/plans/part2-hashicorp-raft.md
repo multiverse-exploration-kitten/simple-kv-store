@@ -3,7 +3,9 @@
 ## Status
 
 - Wave 0 (research) done: `part2-hashicorp-raft/docs/{hashicorp-raft-reference,hashicorp-raft-storage-and-transport,production-patterns}.md`. Plan written.
-- Next: wave 1 (phase 1, core).
+- Wave 1 (phase 1, core) done: 73 unit tests, 4 smoke tests, lint clean. Contract changes are in "Phase 1 changes to the contracts".
+- Next: wave 2 (phases 2-7 in parallel). Do not run `go mod tidy` before phases 7 and 8 import porcupine and Prometheus.
+- Gotcha: under parallel `-race` load a test process can pause for 230 ms. Tests that assert "no leader change" use 500 ms timeouts.
 
 ## Goal
 
@@ -119,6 +121,17 @@ Dockerfile, .dockerignore, docker-compose.yml, Makefile, README.md
 - `faults.go`: `Faults` (shared rule table) and `FaultTransport` that wraps `*raft.NetworkTransport`. It must keep pre-vote, `Close` and pipelining behavior (see the storage doc, Q10). A test fails when the "pre-vote not supported" warning appears.
   Start from the tested wrapper of the research: `/private/tmp/claude-501/-Users-william-workspace-simple-kv-store/2ee5234f-11ad-496c-90b3-250d84527b4f/scratchpad/hraft-storage/faultnet/faultnet.go` (and its test). The storage doc appendix has the same code.
 
+### Phase 1 changes to the contracts (the code is the truth)
+
+- Errors are pointer types (`*node.RejectedError`, `*node.OutcomeUnknownError`, `*node.ValidationError`). `errors.Is(err, raft.ErrLeadershipLost)` works through `Unwrap()`.
+- New reason `unknown_error` (`OutcomeUnknownError`): an unknown raft error on a write is "outcome unknown".
+- Fault rules work per request. `Block(from, to)` blocks only the requests that `from` sends to `to`. A lost-response scenario is `DropResponses(leader, follower)` for each follower.
+- `WaitForLeader` also waits until the leader is `Ready()`.
+- Harness extras: `Logs(id)`, `Transport(id)`, `NodeConfig(id)`. `Start`, `Restart` and `AddNode` return `*node.Node`.
+- FSM: a CAS failure has `Existed=false`. A duplicate returns the original index. `DELETE ?cas=0` means "the key must not exist". A key over 512 bytes is a 400, not a 413.
+- Raft settings: `ShutdownOnRemove=false` (as Consul and Nomad), `NoLegacyTelemetry=true`. `node.New` starts the metrics loop.
+- Builder notes: `.claude/phase-memory/part2-hashicorp-raft/phase-1.md`.
+
 ## Library facts that every builder must know
 
 Sources: the three research docs. Read the cited section before you depend on a fact.
@@ -193,11 +206,11 @@ Rules for every builder:
 
 ### Phase 1: Core
 
-- [ ] `go.mod` with Go 1.25 and every dependency: raft v1.8.0, raft-boltdb/v2 v2.4.1, hclog, go-metrics (+ Prometheus sink), porcupine, staticcheck as a tool (a version that builds with Go 1.25).
-- [ ] `internal/fsm`: the contract above. Unit tests: put, delete, CAS (create only, match, mismatch, delete-CAS), dedupe (duplicate, key reuse with another request = error, FIFO eviction at the limit), snapshot round trip, determinism (two FSMs that apply the same log have equal state), unknown ignorable type is skipped, unknown non-ignorable type panics.
-- [ ] `internal/config`: env parsing and its unit test.
-- [ ] `internal/node`: the contract above. Unit test for the error translation table (each raft error → `RejectedError` or `OutcomeUnknownError`).
-- [ ] `tests/cluster/faults.go`, `harness.go`, `smoke_test.go`: 3 nodes elect one leader. A write replicates to all. A partition heals. A fault-transport test proves that pre-vote stays on.
+- [x] `go.mod` with Go 1.25 and every dependency: raft v1.8.0, raft-boltdb/v2 v2.4.1, hclog, go-metrics (+ Prometheus sink), porcupine, staticcheck as a tool (a version that builds with Go 1.25).
+- [x] `internal/fsm`: the contract above. Unit tests: put, delete, CAS (create only, match, mismatch, delete-CAS), dedupe (duplicate, key reuse with another request = error, FIFO eviction at the limit), snapshot round trip, determinism (two FSMs that apply the same log have equal state), unknown ignorable type is skipped, unknown non-ignorable type panics.
+- [x] `internal/config`: env parsing and its unit test.
+- [x] `internal/node`: the contract above. Unit test for the error translation table (each raft error → `RejectedError` or `OutcomeUnknownError`).
+- [x] `tests/cluster/faults.go`, `harness.go`, `smoke_test.go`: 3 nodes elect one leader. A write replicates to all. A partition heals. A fault-transport test proves that pre-vote stays on.
 
 ### Phase 2: Cluster tests A (election, replication, durability, snapshots, transfer)
 

@@ -9,7 +9,7 @@ This repository is a practice project. It builds the same distributed key-value 
 | Part | Directory | Stack | Status |
 |---|---|---|---|
 | 1 | `part1-pysyncobj/` | Python 3.12, pysyncobj, FastAPI, uv, ruff, pytest, Docker | built |
-| 2 | `part2-hashicorp-raft/` | Go, hashicorp/raft, Docker | not started |
+| 2 | `part2-hashicorp-raft/` | Go 1.25, hashicorp/raft, raft-boltdb, net/http, Docker | in progress |
 | 3 | `part3-etcd-raft/` | Go, go.etcd.io/raft/v3 | not started, needs a plan first |
 
 Shared study material:
@@ -51,7 +51,7 @@ Every part must follow these rules. Tests must prove the rules that are testable
 ## 5. Testing rules
 
 1. Each part has three test levels:
-   - `tests/unit/` — pure logic. No network. Runs in milliseconds.
+   - `tests/unit/` — pure logic. No network. Runs in milliseconds. Go parts follow the Go convention: unit tests sit next to the code (`internal/**/*_test.go`).
    - `tests/cluster/` — real Raft nodes in one process on `127.0.0.1`, with fault injection (kill, restart, partition, one-way partition). These tests demonstrate the failure scenarios.
    - `tests/e2e/` — the Docker cluster. Uses `docker kill`, `docker pause` and `docker network disconnect`. Marked `docker`. Not part of the default test run.
 2. Each failure-scenario test has a docstring with three parts: **Scenario**, **Expected**, **Raft lesson**.
