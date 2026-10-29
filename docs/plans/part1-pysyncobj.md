@@ -3,8 +3,10 @@
 ## Status
 
 - Wave 1 (core, inline): done. 3-node smoke, restart and full-restart recovery checked by hand.
-- Wave 2 (phases 2, 3, 4): in progress, 3 builders in parallel.
-- Next: wave 3 (Docker + e2e, README).
+- Wave 2 (phases 2, 3, 4): done. 16 cluster tests, 21 API tests. Core fixes: is_ready() barrier, fast "no_quorum" 503.
+- Wave 3: phase 5 (Docker + e2e) in progress. Phase 6 (README + findings in the reference doc) starts after phase 5 and research.
+- Findings to document: no pre-vote, no fsync (mmap journal), commit index saved once per second,
+  stale leader address on a cut-off follower, write latency about 2 heartbeats, LEADER_CHANGED is ambiguous.
 - Gotchas: `LEADER_CHANGED` is an unknown outcome, not a safe retry. `commandsWaitLeader=False` makes "no leader" fail fast.
   `useFork=False` (fork with threads can deadlock). More in `part1-pysyncobj/docs/pysyncobj-reference.md`.
 
