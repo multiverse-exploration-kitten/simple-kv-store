@@ -1,0 +1,40 @@
+# Local-only files (never commit)
+goal.md
+.claude/settings.local.json
+.claude/phase-memory/
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Raft node data written by local runs and tests (journals, snapshots)
+raft-data/
+*.journal
+*.dump
+
+# Go (parts 2 and 3)
+bin/
+*.test
+*.out
+coverage.*
+go.work.sum
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~

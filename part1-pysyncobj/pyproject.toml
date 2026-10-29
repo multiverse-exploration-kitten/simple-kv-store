@@ -1,0 +1,44 @@
+[project]
+name = "kvstore"
+version = "0.1.0"
+description = "A 3-node replicated key-value store on Raft (pysyncobj), built to learn Raft in production"
+readme = "README.md"
+authors = [
+    { name = "will_bit", email = "15639788+multiverse-exploration-kitten@users.noreply.github.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.162.0",
+    "pysyncobj>=0.3.17",
+    "uvicorn>=0.54.0",
+]
+
+[project.scripts]
+kvstore = "kvstore.__main__:main"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28",
+    "pytest>=8.3",
+    "pytest-timeout>=2.3",
+    "ruff>=0.11",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "PT", "RUF"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -m 'not docker'"
+timeout = 120
+markers = [
+    "docker: end-to-end tests against the Docker cluster (run with: pytest -m docker)",
+]
