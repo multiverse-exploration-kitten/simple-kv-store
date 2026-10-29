@@ -1,0 +1,87 @@
+# A 3-node Raft cluster. Start it from part1-pysyncobj/: docker compose up -d --build --wait
+#
+# HTTP API on the host: node1 8001, node2 8002, node3 8003. The Raft port 4321 stays inside
+# the "raft" network. The e2e tests start a second cluster next to this one. They use another
+# project name (-p), other host ports (KV_NODE<N>_HTTP_PORT) and another subnet (KV_SUBNET_PREFIX).
+
+name: kvstore-part1
+
+x-kvstore-node: &kvstore-node
+  # No shared `image:` name. Compose 2.17 builds each service on its own and adds a
+  # per-service label, so a shared tag would leave 2 dangling images per build.
+  build: .
+  # The chaos commands and the e2e tests decide when a stopped node comes back.
+  restart: "no"
+  stop_grace_period: 10s
+  healthcheck:
+    # The slim image has no curl. urlopen raises on a connection error or a non-2xx status.
+    test:
+      - CMD
+      - python
+      - -c
+      - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=2)
+    interval: 2s
+    timeout: 3s
+    retries: 10
+    start_period: 10s
+
+services:
+  node1:
+    <<: *kvstore-node
+    environment:
+      KV_SELF_ADDRESS: node1:4321
+      KV_BIND_ADDRESS: 0.0.0.0:4321
+      KV_PEERS: node1:4321,node2:4321,node3:4321
+      KV_DATA_DIR: /data
+    ports:
+      - "${KV_NODE1_HTTP_PORT:-8001}:8000"
+    volumes:
+      - node1-data:/data
+    networks:
+      raft:
+        ipv4_address: ${KV_SUBNET_PREFIX:-172.28.1}.11
+
+  node2:
+    <<: *kvstore-node
+    environment:
+      KV_SELF_ADDRESS: node2:4321
+      KV_BIND_ADDRESS: 0.0.0.0:4321
+      KV_PEERS: node1:4321,node2:4321,node3:4321
+      KV_DATA_DIR: /data
+    ports:
+      - "${KV_NODE2_HTTP_PORT:-8002}:8000"
+    volumes:
+      - node2-data:/data
+    networks:
+      raft:
+        ipv4_address: ${KV_SUBNET_PREFIX:-172.28.1}.12
+
+  node3:
+    <<: *kvstore-node
+    environment:
+      KV_SELF_ADDRESS: node3:4321
+      KV_BIND_ADDRESS: 0.0.0.0:4321
+      KV_PEERS: node1:4321,node2:4321,node3:4321
+      KV_DATA_DIR: /data
+    ports:
+      - "${KV_NODE3_HTTP_PORT:-8003}:8000"
+    volumes:
+      - node3-data:/data
+    networks:
+      raft:
+        ipv4_address: ${KV_SUBNET_PREFIX:-172.28.1}.13
+
+networks:
+  # Static IPs: pysyncobj caches DNS results for 600 s (dnsCacheTime). A restarted container
+  # with a new IP would be unreachable for its peers until that cache expires.
+  # `make heal` reconnects a node with the same IP: <prefix>.1N for nodeN.
+  raft:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${KV_SUBNET_PREFIX:-172.28.1}.0/24
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
