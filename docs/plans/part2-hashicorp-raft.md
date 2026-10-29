@@ -4,7 +4,9 @@
 
 - Wave 0 (research) done: `part2-hashicorp-raft/docs/{hashicorp-raft-reference,hashicorp-raft-storage-and-transport,production-patterns}.md`. Plan written.
 - Wave 1 (phase 1, core) done: 73 unit tests, 4 smoke tests, lint clean. Contract changes are in "Phase 1 changes to the contracts".
-- Next: wave 2 (phases 2-7 in parallel). Do not run `go mod tidy` before phases 7 and 8 import porcupine and Prometheus.
+- Wave 2 (phases 2-7) done: 215 unit tests, about 45 cluster tests (Porcupine check included), lint clean.
+- Next: phase 1 fixes (VerifyLeader outside the deadline, ErrEnqueueTimeout reported as 504, shared store opener), phase 8 (running), then phase 9 docs.
+- Do not run `go mod tidy` before phase 8 imports the go-metrics Prometheus sink.
 - Gotcha: under parallel `-race` load a test process can pause for 230 ms. Tests that assert "no leader change" use 500 ms timeouts.
 
 ## Goal
@@ -214,52 +216,52 @@ Rules for every builder:
 
 ### Phase 2: Cluster tests A (election, replication, durability, snapshots, transfer)
 
-- [ ] Exactly one leader. All nodes agree on the leader and the term.
-- [ ] Leader stop: the 2 survivors elect a new leader in a higher term. Committed data survives. Writes continue.
-- [ ] A write on a follower returns `RejectedError{not_leader}` with the leader ID.
-- [ ] One follower down: writes still commit.
-- [ ] A stopped follower restarts and catches up from the log.
-- [ ] Low `TrailingLogs` and `Threshold`: a follower that missed many writes catches up through `InstallSnapshot`. Assert the snapshot index on that follower.
-- [ ] Full cluster restart: all data is back. Linearizable reads work again only after the new leader's barrier.
-- [ ] Leadership transfer: the target becomes leader. Writes continue. Writes during the transfer get `leadership_transfer_in_progress` (503) or succeed.
-- [ ] Each write returns the Raft index. `ModifyIndex` grows. The FSM `LastAppliedIndex` matches on all nodes after the writes.
+- [x] Exactly one leader. All nodes agree on the leader and the term.
+- [x] Leader stop: the 2 survivors elect a new leader in a higher term. Committed data survives. Writes continue.
+- [x] A write on a follower returns `RejectedError{not_leader}` with the leader ID.
+- [x] One follower down: writes still commit.
+- [x] A stopped follower restarts and catches up from the log.
+- [x] Low `TrailingLogs` and `Threshold`: a follower that missed many writes catches up through `InstallSnapshot`. Assert the snapshot index on that follower.
+- [x] Full cluster restart: all data is back. Linearizable reads work again only after the new leader's barrier.
+- [x] Leadership transfer: the target becomes leader. Writes continue. Writes during the transfer get `leadership_transfer_in_progress` (503) or succeed.
+- [x] Each write returns the Raft index. `ModifyIndex` grows. The FSM `LastAppliedIndex` matches on all nodes after the writes.
 
 ### Phase 3: Cluster tests B (quorum loss, partitions, reads, ambiguity, concurrency, pre-vote, disk stall)
 
-- [ ] Majority down: writes fail with 503 or 504 within `CommandTimeout`. They do not hang. A linearizable read fails. A stale read returns the old value.
-- [ ] Leader isolated: the majority elects a new leader. The old leader steps down after `LeaderLeaseTimeout`. Its write fails with `leadership_lost` and is gone after the heal.
-- [ ] Read modes on an isolated old leader before it steps down: `leader` returns the old value, `linearizable` fails (`VerifyLeader`).
-- [ ] Stale read on a partitioned follower: returns the old value. `max_stale` rejects it with `too_stale`.
-- [ ] Ambiguous write: `DropResponses` from the followers to the leader. The write gets `OutcomeUnknownError`. After the heal the write is committed.
-- [ ] Idempotent retry: in the same scenario, a CAS write without a key and its retry gives a false `cas_failed`. With an `Idempotency-Key` the retry returns the original success with `Duplicate=true`.
-- [ ] CAS under concurrency: many goroutines increment one counter with CAS through different nodes. Final value = number of successful CAS calls.
-- [ ] Pre-vote: an isolated follower does not raise its term. After the heal the leader stays. With `PreVoteDisabled` the leader steps down (show the term jump).
-- [ ] Disk stall: `WrapLogStore` makes `StoreLogs` block on the leader. Test and record what the cluster does (reference Q15: #503, #666). Write the test for the observed behavior.
+- [x] Majority down: writes fail with 503 or 504 within `CommandTimeout`. They do not hang. A linearizable read fails. A stale read returns the old value.
+- [x] Leader isolated: the majority elects a new leader. The old leader steps down after `LeaderLeaseTimeout`. Its write fails with `leadership_lost` and is gone after the heal.
+- [x] Read modes on an isolated old leader before it steps down: `leader` returns the old value, `linearizable` fails (`VerifyLeader`).
+- [x] Stale read on a partitioned follower: returns the old value. `max_stale` rejects it with `too_stale`.
+- [x] Ambiguous write: `DropResponses` from the followers to the leader. The write gets `OutcomeUnknownError`. After the heal the write is committed.
+- [x] Idempotent retry: in the same scenario, a CAS write without a key and its retry gives a false `cas_failed`. With an `Idempotency-Key` the retry returns the original success with `Duplicate=true`.
+- [x] CAS under concurrency: many goroutines increment one counter with CAS through different nodes. Final value = number of successful CAS calls.
+- [x] Pre-vote: an isolated follower does not raise its term. After the heal the leader stays. With `PreVoteDisabled` the leader steps down (show the term jump).
+- [x] Disk stall: `WrapLogStore` makes `StoreLogs` block on the leader. Test and record what the cluster does (reference Q15: #503, #666). Write the test for the observed behavior.
 
 ### Phase 4: HTTP API
 
-- [ ] `internal/httpapi`: the contract above. Unit tests with a fake `NodeAPI` for every route and every error mapping. Forwarding tests with a fake leader (`httptest.Server`): forward once, loop guard, dial error = 503, broken forward on a write = 504, hold while no leader.
-- [ ] `tests/cluster/http_test.go`: real cluster + one `httptest.Server` per node. A write through a follower is forwarded and readable on all nodes. A `stale` read on a follower is served locally (`X-KV-Served-By`).
+- [x] `internal/httpapi`: the contract above. Unit tests with a fake `NodeAPI` for every route and every error mapping. Forwarding tests with a fake leader (`httptest.Server`): forward once, loop guard, dial error = 503, broken forward on a write = 504, hold while no leader.
+- [x] `tests/cluster/http_test.go`: real cluster + one `httptest.Server` per node. A write through a follower is forwarded and readable on all nodes. A `stale` read on a follower is served locally (`X-KV-Served-By`).
 
 ### Phase 5: Membership and recovery
 
-- [ ] Add a 4th node: `AddNonvoter`, wait until it caught up, `AddVoter`. Then 4 voters: stopping 2 stops writes (quorum 3).
-- [ ] Replace a failed node: `RemoveServer(dead)`, then add a new node with a new ID and an empty data dir.
-- [ ] Remove a node: the 2-node cluster keeps writing. The removed node does not get new writes (reference: it is not shut down).
-- [ ] Known bug #725: `VerifyLeader` counts non-voters. Demonstrate it if you can (isolate leader + non-voter). Name the issue in the doc comment.
-- [ ] `internal/node/recovery.go`: `RecoverCluster(cfg Config, deps Dependencies, servers []Server) error` (wraps `raft.RecoverCluster` with the same stores). Test: lose 2 of 3 nodes, recover the survivor as a 1-node cluster, writes work. Show the data loss case from reference Q10.
+- [x] Add a 4th node: `AddNonvoter`, wait until it caught up, `AddVoter`. Then 4 voters: stopping 2 stops writes (quorum 3).
+- [x] Replace a failed node: `RemoveServer(dead)`, then add a new node with a new ID and an empty data dir.
+- [x] Remove a node: the 2-node cluster keeps writing. The removed node does not get new writes (reference: it is not shut down).
+- [x] Known bug #725: `VerifyLeader` counts non-voters. Demonstrate it if you can (isolate leader + non-voter). Name the issue in the doc comment.
+- [x] `internal/node/recovery.go`: `RecoverCluster(cfg Config, deps Dependencies, servers []Server) error` (wraps `raft.RecoverCluster` with the same stores). Test: lose 2 of 3 nodes, recover the survivor as a 1-node cluster, writes work. Show the data loss case from reference Q10.
 
 ### Phase 6: Mutual TLS
 
-- [ ] `internal/tlsstream`: `StreamLayer` (implements `raft.StreamLayer`), `NewStreamLayer(bindAddress string, advertise net.Addr, tlsConfig *tls.Config)`, `LoadMutualTLS(caFile, certFile, keyFile string) (*tls.Config, error)` (TLS 1.3, `RequireAndVerifyClientCert`, server name from the dial address), `GenerateCertificates(dir string, nodes []NodeIdentity) error` (CA + one cert per node, DNS and IP SANs, key files 0600).
-- [ ] Unit tests: handshake works. A client with a cert from another CA is rejected. A client without a cert is rejected.
-- [ ] `tests/cluster/tls_test.go`: a 3-node cluster over mutual TLS (harness `NewTransport` option) elects a leader and replicates.
+- [x] `internal/tlsstream`: `StreamLayer` (implements `raft.StreamLayer`), `NewStreamLayer(bindAddress string, advertise net.Addr, tlsConfig *tls.Config)`, `LoadMutualTLS(caFile, certFile, keyFile string) (*tls.Config, error)` (TLS 1.3, `RequireAndVerifyClientCert`, server name from the dial address), `GenerateCertificates(dir string, nodes []NodeIdentity) error` (CA + one cert per node, DNS and IP SANs, key files 0600).
+- [x] Unit tests: handshake works. A client with a cert from another CA is rejected. A client without a cert is rejected.
+- [x] `tests/cluster/tls_test.go`: a 3-node cluster over mutual TLS (harness `NewTransport` option) elects a leader and replicates.
 
 ### Phase 7: Linearizability check
 
-- [ ] `tests/cluster/history.go`: record each client operation (client, input, call time, return time, output). An operation with an unknown outcome is open (no return).
-- [ ] `tests/cluster/linearizability_test.go`: clients run put and get through random nodes. A nemesis partitions, heals, stops and restarts nodes. Porcupine checks the history. Print the seed. Write the Porcupine visualization to `t.TempDir()` on failure.
-- [ ] A second test: `leader` or `stale` reads during a leader partition. Porcupine must find the violation. This proves the checker works.
+- [x] `tests/cluster/history.go`: record each client operation (client, input, call time, return time, output). An operation with an unknown outcome is open (no return).
+- [x] `tests/cluster/linearizability_test.go`: clients run put and get through random nodes. A nemesis partitions, heals, stops and restarts nodes. Porcupine checks the history. Print the seed. Write the Porcupine visualization to `t.TempDir()` on failure.
+- [x] A second test: `leader` or `stale` reads during a leader partition. Porcupine must find the violation. This proves the checker works.
 
 ### Phase 8: Binary, Docker, e2e
 
