@@ -7,8 +7,9 @@
 - Wave 2 (phases 2-7) done: 215 unit tests, 38 cluster tests (Porcupine check included), lint clean.
 - Phase 1 fixes done: every raft call runs under the deadline, enqueue timeout = 503, one store opener.
 - Phases 8 and 9 done: binary, Docker (mutual TLS, distroless), Makefile, 6 e2e subtests, README, 27 lessons. Forward dial timeout 1 s (lesson 27).
-- Last full run: `go test -race ./...` all 7 packages ok (cluster 105 s), `make e2e` 6/6 ok, lint clean.
-- Next: one code review of part 2. The user decides what to fix.
+- Phase 10 (review fixes) done: all 10 findings fixed. 9 have a regression test (no test can force the order of finding 5). Lessons 28-33. Admin token in `.env`.
+- Last full run: `go test -race ./...` 340 tests in 7 packages ok, `make e2e` 8/8 ok, lint clean.
+- Next: nothing planned. Known gaps: membership check and call are not atomic (prevIndex 0), plain TCP has no handshake deadline.
 - Gotcha: under parallel `-race` load a test process can pause for 230 ms. Tests that assert "no leader change" use 500 ms timeouts.
 
 ## Goal
@@ -167,10 +168,10 @@ Sources: the three research docs. Read the cited section before you depend on a 
 | GET | `/health/ready` | | 200, or 503 with the reason | |
 | GET | `/health/leader` | | 200 on a ready leader, 429 on a follower | |
 | GET | `/cluster/servers` | | 200 `{"servers": [{"id","address","suffrage"}]}` | 503 |
-| POST | `/cluster/servers` | `{"id","address","voter": bool}` | 200 | 400, 503, 504 |
-| DELETE | `/cluster/servers/{id}` | | 200 | 503, 504 |
-| POST | `/cluster/transfer-leadership` | `{"id": str}` (optional) | 200 | 503, 504 |
-| POST | `/admin/snapshot` | | 200 | 503 |
+| POST | `/cluster/servers` | `{"id","address","voter": bool}`, admin token | 200 | 400, 401, 403, 503, 504 |
+| DELETE | `/cluster/servers/{id}` | admin token | 200 | 401, 403, 503, 504 |
+| POST | `/cluster/transfer-leadership` | `{"id": str}` (optional), admin token | 200 | 400, 401, 403, 503, 504 |
+| POST | `/admin/snapshot` | admin token | 200 | 401, 403, 503 |
 | GET | `/metrics` | | Prometheus text | |
 
 - Every read response has headers `X-KV-Index`, `X-KV-Known-Leader`, `X-KV-Last-Contact` (ms), `X-KV-Served-By`.
@@ -183,7 +184,7 @@ Sources: the three research docs. Read the cited section before you depend on a 
 
 ## Environment (phase 8, `cmd/kvstore`)
 
-`KV_NODE_ID` (required), `KV_RAFT_ADDRESS` (advertised, required), `KV_RAFT_BIND_ADDRESS` (default `0.0.0.0:7000`), `KV_HTTP_ADDRESS` (default `:8000`), `KV_DATA_DIR` (default `/data`), `KV_BOOTSTRAP` (default `false`), `KV_PEERS` (`id=raftAddress,…`), `KV_PEER_HTTP` (`id=http://host:port,…`), `KV_TIMING_MULTIPLIER` (default 1), `KV_COMMAND_TIMEOUT` (default `5s`), `KV_RAFT_TLS_CA_FILE`, `KV_RAFT_TLS_CERT_FILE`, `KV_RAFT_TLS_KEY_FILE`, `KV_RAFT_INSECURE_PLAINTEXT` (default `false`), `KV_LOG_LEVEL` (default `info`), `KV_LOG_JSON` (default `false`).
+`KV_NODE_ID` (required), `KV_RAFT_ADDRESS` (advertised, required), `KV_RAFT_BIND_ADDRESS` (default `0.0.0.0:7000`), `KV_HTTP_ADDRESS` (default `:8000`), `KV_DATA_DIR` (default `/data`), `KV_BOOTSTRAP` (default `false`), `KV_PEERS` (`id=raftAddress,…`), `KV_PEER_HTTP` (`id=http://host:port,…`), `KV_TIMING_MULTIPLIER` (default 1), `KV_COMMAND_TIMEOUT` (default `5s`), `KV_RAFT_TLS_CA_FILE`, `KV_RAFT_TLS_CERT_FILE`, `KV_RAFT_TLS_KEY_FILE`, `KV_RAFT_INSECURE_PLAINTEXT` (default `false`), `KV_LOG_LEVEL` (default `info`), `KV_LOG_JSON` (default `false`), `KV_ADMIN_TOKEN` (phase 10, empty = admin calls answer 403).
 Phase 1 writes `internal/config` with these fields and its unit test. A bad value is an error that names the variable.
 
 ## Phases and parallel map
@@ -199,6 +200,10 @@ Phase 1 writes `internal/config` with these fields and its unit test. A bad valu
 | 7 Linearizability | 2 | Complex | `tests/cluster/{history.go,linearizability_test.go}` |
 | 8 Binary + Docker + e2e | 3 | Complex | `cmd/kvstore/**`, `Dockerfile`, `.dockerignore`, `docker-compose.yml`, `Makefile`, `tests/e2e/**` |
 | 9 Docs | 4 | Simple | `README.md`, `docs/lessons-from-tests.md` |
+| 10a Review fixes: writes and reads | 5 | Complex | `internal/fsm/{command.go,fsm_test.go}`, `internal/node/{node,reads,errors}.go`, `internal/node/{errors,node,reads}_test.go`, `tests/cluster/{read_consistency,http}_test.go`, new `tests/cluster/{busy_follower,leader_read}_test.go` |
+| 10b Review fixes: membership | 5 | Simple | `internal/node/membership.go`, new `internal/node/membership_test.go`, `tests/cluster/{transfer,membership}_test.go` |
+| 10c Review fixes: security and operations | 5 | Complex | `internal/httpapi/**`, `internal/config/**`, `internal/tlsstream/**`, `cmd/kvstore/**`, `docker-compose.yml`, `Makefile`, `tests/e2e/**`, `tests/cluster/tls_test.go` |
+| 10d Review fixes: docs | 6 | Simple | `README.md`, `docs/lessons-from-tests.md` (main session) |
 
 Rules for every builder:
 - Edit only the files you own. If you need a change in another file, stop and report it.
@@ -275,3 +280,19 @@ Rules for every builder:
 
 - [x] `README.md`: what it is, architecture, API, run, test, chaos commands, a table "failure scenario → test → Raft lesson", and "part 1 vs part 2".
 - [x] `docs/lessons-from-tests.md`: what the tests found about hashicorp/raft.
+
+### Phase 10: Review fixes
+
+The code review found 10 problems. Each fix gets a regression test that fails before the fix. Repro tests from the review are in the session scratchpad (`review/mod/**/review*_test.go`). Port them into the owned files.
+
+- [x] 10a-1 (finding 1, `node.go`): a write on a node that is not the leader returns `not_leader` or `no_leader` before `raft.Apply`. A busy follower (stalled log store) must not answer `enqueue_timeout`. The HTTP layer then forwards the write.
+- [x] 10a-2 (finding 6, `command.go`, `node.go`): the size limit applies to the encoded command too. A 512 KiB value of characters that JSON escapes must not make a 3 MiB Raft entry. Over the limit = 413.
+- [x] 10a-3 (finding 2, `reads.go`): a `leader` read waits for the leader barrier (readyTerm = current term), the same as a `linearizable` read. Before the barrier it answers 503 `not_ready`.
+- [x] 10a-4 (finding 5, `reads.go`): a `linearizable` read checks readiness after `VerifyLeader`, with the term from before the verify (as Consul does).
+- [x] 10b-1 (finding 3, `membership.go`): a leadership transfer to a server that is not a voter gives 400. Raft issue #727.
+- [x] 10b-2 (finding 4, `membership.go`): an add of a non-voter with the ID of an existing voter gives 400. The configuration does not change.
+- [x] 10c-1 (finding 7): the mutating membership and admin endpoints need `Authorization: Bearer <KV_ADMIN_TOKEN>`. Without a token in the config they answer 403. `make up` and `make e2e` write a random token to `.env`.
+- [x] 10c-2 (finding 8): each node mounts only `ca.crt` and its own certificate and key. The CA private key stays in a volume that only the `certs` service mounts.
+- [x] 10c-3 (finding 9): an inbound Raft connection that does not finish the TLS handshake in time is closed. The accept loop does not block.
+- [x] 10c-4 (finding 10): the HTTP server has `ReadHeaderTimeout`, `ReadTimeout`, `WriteTimeout` and `IdleTimeout`. `WriteTimeout` is longer than the hold time plus the forward time.
+- [x] 10d: README and lessons describe the changed behavior.

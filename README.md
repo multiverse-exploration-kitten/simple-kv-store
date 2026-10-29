@@ -172,6 +172,7 @@ Run `make` alone to see all commands. The part 2 README explains the read modes,
 ## Notes
 
 - Part 1: `make up` writes a random Raft peer password to `part1-pysyncobj/.env`. Git ignores this file.
-- Part 2: the certificates live in a Docker volume. `make down` deletes them.
+- Part 2: the certificates live in Docker volumes. `make down` deletes them.
+- Part 2: `make up` writes a random admin token to `part2-hashicorp-raft/.env` (git-ignored). The membership and snapshot calls need it.
 - Part 1 and part 2 use different ports and subnets, so both clusters can run at the same time.
 - Each part is self-contained. Parts do not share code.

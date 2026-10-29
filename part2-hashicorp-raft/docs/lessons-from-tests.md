@@ -235,7 +235,7 @@ With mutual TLS, every RPC from a peer with a certificate from another CA failed
 **Test.** `TestTLSPeerWithCertificateFromAnotherCACannotSendRPCs` (`tls_test.go`).
 
 **Production.** Use mutual TLS for the Raft port, and fail closed. `NewStreamLayer` returns an error when client certificates are not required.
-Known gap: the server side of the handshake has no deadline. A peer that connects and stays silent keeps one goroutine. Plain TCP has the same exposure.
+Fixed later (lesson 32): the server side of the handshake now has a deadline. Plain TCP still has no deadline.
 
 ## 25. Process pauses under `-race` load break short lease tests
 
@@ -263,3 +263,51 @@ Porcupine 1.3.1 has no pending operations. An open operation gets `Return = math
 
 **Production.** Give the forward path its own short connect timeout. A connect timeout sends no byte, so a retry is safe.
 Known gap: a paused leader (`docker pause`) sends no FIN. A pooled keep-alive connection to it waits until the forward timeout. A write then gets 504 and a read gets 503.
+
+## 28. A busy follower does not say "not leader"
+
+**What happened.** A test stalls the `StoreLogs` of one follower. Its raft main loop blocks inside an AppendEntries call. `raft.Apply` on a follower waits for the main loop to answer `ErrNotLeader`. The blocked loop does not answer, so `Apply` ends with `ErrEnqueueTimeout`. The API gave 503 `enqueue_timeout` and did not forward the write. `AddNonvoter`, `RemoveServer` and `LeadershipTransfer` did the same.
+
+**Tests.** `TestBusyFollowerWriteIsForwardedToLeader` (`tests/cluster/busy_follower_test.go`).
+
+**Production.** Check `raft.State()` before `Apply`, before a membership change and before a leadership transfer. `State()` is an atomic read and does not need the main loop. Then a busy follower answers `not_leader` at once, and the HTTP layer forwards the request.
+
+## 29. A new leader may not know the commit index yet
+
+**What happened.** The old leader acknowledged a write. The new leader had the entry in its log but did not apply it yet. A `leader` read on the new leader returned the old value. A follower learns the commit index only from AppendEntries calls with entries. In hashicorp/raft v1.8.0 a heartbeat carries only the term and the leader (`replication.go:390`). The new leader applies the entries of old terms only after it commits an entry of its own term (the barrier).
+
+**Tests.** `TestLeaderReadOnNewLeaderWaitsForBarrier` (`tests/cluster/leader_read_test.go`).
+
+**Production.** Do not serve a local read on a new leader before the barrier of its term is done. The `leader` mode now answers 503 `not_ready` before the barrier. A `linearizable` read checks the barrier after `VerifyLeader()`, in the term from before the verify, as Consul does. No test can force the bad order from the outside, so that part has no test.
+
+## 30. JSON escaping makes a Raft entry bigger than the value
+
+**What happened.** Go's `json.Marshal` writes `<`, `>`, `&` and control characters as `<` (6 bytes). A 512 KiB value of `<` made a 3 MiB Raft entry. hashicorp/raft has `SuggestedMaxDataSize` = 512 KiB (`api.go:30`), but it does not enforce it.
+
+**Tests.** `TestPutRejectsValueWhoseEncodedCommandIsTooLarge`, `TestPutAcceptsLargestPlainValueWithLongestEscapedKeys` (`internal/node/node_test.go`), `TestEncodeCommandBytesStayTheSame` (`internal/fsm`).
+
+**Production.** Limit the size of the encoded entry, not only the size of the input. Do not change the encoding to fix it, because old nodes must read the new entries during a rolling upgrade. We kept the bytes the same and added a 1 MiB limit on the encoded command (413).
+
+## 31. raft does not check the target of a membership call
+
+**What happened.** `LeadershipTransferToServer` accepts a non-voter (issue #727). It forces an election and returns success. `AddNonvoter` with the ID of an existing voter keeps the server a voter but rewrites its address. A wrong address then breaks the quorum.
+
+**Tests.** `TestTransferLeadershipToNonvoterIsRejected` (`tests/cluster/transfer_test.go`), `TestMembershipAddNonvoterOnExistingVoterIsRejected` (`tests/cluster/membership_test.go`).
+
+**Production.** Read the configuration and check the suffrage before you call raft. Both calls now give 400. Known gap: the check and the call are not atomic. The `prevIndex` argument of raft can make them atomic. We pass 0.
+
+## 32. A silent peer kept a Raft connection open forever
+
+**What happened.** A test opened a TCP connection to the Raft port and sent nothing. The TLS stream layer returned the connection from `Accept`, and the handshake ran at the first read. raft's connection goroutine waited in that read with no deadline, so the connection and the goroutine stayed forever. Many such connections use up file descriptors.
+
+**Tests.** `TestSilentInboundConnectionIsClosedAfterTheHandshakeTimeout`, `TestAcceptDoesNotWaitForTheHandshake`, `TestIdleConnectionAfterTheHandshakeStaysOpen`, `TestDialWithoutTimeoutStillLimitsTheHandshake` (`internal/tlsstream/handshake_test.go`).
+
+**Production.** Do not run the handshake inside `Accept`. raft has one accept loop, so one slow client would stop all new connections. The first read or write of the connection runs the handshake with a 5 s deadline and then clears the deadline. A connection that is idle after the handshake stays open, because raft keeps pooled connections.
+
+## 33. The HTTP server timeouts must fit the hold and the forward
+
+**What happened.** The `http.Server` had no `ReadTimeout`, `WriteTimeout` or `IdleTimeout`. A client that sends a body very slowly kept a connection and a goroutine. A `WriteTimeout` that is too short cuts a request that waits for a leader (hold, 5 s) and then is forwarded (forward timeout).
+
+**Tests.** `TestHTTPServerTimeoutsCoverTheHoldAndTheForward` (`cmd/kvstore/serve_test.go`).
+
+**Production.** `ReadHeaderTimeout` 10 s, `ReadTimeout` 30 s, `IdleTimeout` 2 min. `WriteTimeout` = `ReadTimeout` + hold + forward timeout (45 s), derived from the config, not a fixed guess. `ReadTimeout` does not stop a handler that runs. The server `IdleTimeout` is longer than the 90 s idle timeout of the forward client, so the client closes an idle connection first.

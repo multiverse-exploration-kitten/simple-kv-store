@@ -9,7 +9,7 @@ This repository is a practice project. It builds the same distributed key-value 
 | Part | Directory | Stack | Status |
 |---|---|---|---|
 | 1 | `part1-pysyncobj/` | Python 3.12, pysyncobj, FastAPI, uv, ruff, pytest, Docker | built |
-| 2 | `part2-hashicorp-raft/` | Go 1.25, hashicorp/raft, raft-boltdb, net/http, Docker | in progress |
+| 2 | `part2-hashicorp-raft/` | Go 1.25, hashicorp/raft, raft-boltdb, net/http, Docker | built |
 | 3 | `part3-etcd-raft/` | Go, go.etcd.io/raft/v3 | not started, needs a plan first |
 
 Shared study material:

@@ -18,12 +18,16 @@ HTTP client -> httpapi (forward to leader if needed) -> node.Node -> raft.Raft -
 ```
 
 - hashicorp/raft accepts a write only on the leader. It does not forward.
+  A node checks `raft.State()` before each write, so a follower with a slow disk answers `not_leader` at once and does not time out.
   The HTTP layer forwards a request to the leader once (`X-KV-Forwarded-From` stops loops).
 - While the node knows no leader, the HTTP layer holds the request up to 5 s and tries again. It does this only for errors that changed nothing.
 - Every raft call runs under a deadline (`KV_COMMAND_TIMEOUT`, default 5 s). A miss is 504, outcome unknown.
-- The default read is linearizable: the leader must be ready (barrier done in its term) and `VerifyLeader()` must pass.
+- The default read is linearizable: `VerifyLeader()` must pass, and then the barrier must be done in the same term.
 - The FSM keeps the last 10,000 idempotency keys, so a retry of a lost write is safe.
 - One process per node. The Raft port 7000 uses mutual TLS (TLS 1.3, client certificates required) and stays inside the Docker network.
+  A peer must finish the TLS handshake in 5 s, or the node closes the connection.
+- Each node mounts only `ca.crt` and its own key pair. The CA key is in a volume that no node mounts.
+- The 4 admin calls (membership changes, leadership transfer, snapshot) need the token `KV_ADMIN_TOKEN`.
 - Each node keeps `raft.db` (log and stable store, fsync on) and its snapshots on its own Docker volume.
 - 3 nodes: a majority of 3 is 2, so one node can fail. A 4th node raises the majority to 3 and still tolerates only one failure.
 
@@ -71,6 +75,12 @@ A write with an idempotency key. A retry with the same key and the same request 
 curl -X PUT http://127.0.0.1:8101/kv/order-1 -H 'Idempotency-Key: abc-1' -H 'Content-Type: application/json' -d '{"value": "x"}'
 ```
 
+An admin call needs the token. `make up` wrote a random token to `.env` (git-ignored, mode 0600).
+
+```bash
+curl -X POST -H "Authorization: Bearer $(sed -n 's/^KV_ADMIN_TOKEN=//p' .env)" http://127.0.0.1:8101/admin/snapshot
+```
+
 Stop the cluster and delete its data and certificates.
 
 ```bash
@@ -92,20 +102,21 @@ The HTTP ports on the host are 8101 (node1), 8102 (node2) and 8103 (node3).
 | GET | `/health/ready` | 200, or 503 with the reason. |
 | GET | `/health/leader` | 200 on a ready leader, 503 on a leader before its barrier, 429 on a follower. |
 | GET | `/cluster/servers` | List the Raft configuration. |
-| POST | `/cluster/servers` | Body `{"id","address","voter"}`. `voter` defaults to false (non-voter first). |
-| DELETE | `/cluster/servers/{id}` | Delete a server from the configuration. |
-| POST | `/cluster/transfer-leadership` | Optional body `{"id"}`. |
-| POST | `/admin/snapshot` | Take a snapshot now. |
+| POST | `/cluster/servers` | Admin token. Body `{"id","address","voter"}`. `voter` defaults to false (non-voter first). An ID that is already a voter gives 400. |
+| DELETE | `/cluster/servers/{id}` | Admin token. Delete a server from the configuration. |
+| POST | `/cluster/transfer-leadership` | Admin token. Optional body `{"id"}`. The target must be a voter (400 otherwise). |
+| POST | `/admin/snapshot` | Admin token. Take a snapshot now. |
 | GET | `/metrics` | Prometheus text. |
 
 Keys may contain `/`. A key has 1 to 512 bytes. A value has up to 512 KiB.
+The encoded Raft entry has up to 1 MiB. JSON writes `<`, `>`, `&` and control characters as 6 bytes, so a value of only such characters gets 413 at about 170 KiB.
 
 ### Read consistency
 
 | Mode | Where it runs | Can it be stale? |
 |---|---|---|
 | `linearizable` (default) | Leader only. Needs a ready leader and `VerifyLeader()`. A follower forwards it. | No. |
-| `leader` | Leader only. No quorum check (Consul "default"). | Yes, on an old leader that does not know it lost the lease. |
+| `leader` | Leader only. Waits for the barrier of the current term (503 `not_ready` before). No quorum check (Consul "default"). | Yes, on an old leader that does not know it lost the lease. |
 | `stale` | Any node, from local memory. `max_stale` bounds the time since the last leader contact. | Yes. `max_stale` does not bound how many writes the node missed. |
 
 Every read answer has the headers `X-KV-Index`, `X-KV-Known-Leader`, `X-KV-Last-Contact` (ms) and `X-KV-Served-By`.
@@ -119,10 +130,12 @@ Do not read, edit and write back without CAS.
 
 | Code | Meaning | Body |
 |---|---|---|
-| 400 | Bad input (key, `cas`, `max_stale`, UTF-8). | `{"error":"invalid_request","field","message"}` |
+| 400 | Bad input (key, `cas`, `max_stale`, UTF-8). Also a leadership transfer to a non-voter, or a non-voter add with the ID of a voter. | `{"error":"invalid_request","field","message"}` |
+| 401 | Admin call without the right `Authorization: Bearer <token>` header. | `{"error":"unauthorized"}` |
+| 403 | Admin call on a node that has no `KV_ADMIN_TOKEN`. The admin calls are off. | `{"error":"admin_disabled"}` |
 | 404 | Key not found. | `{"error":"key_not_found","key"}` |
 | 409 | CAS failed. Also `nothing_to_snapshot` on `/admin/snapshot`. | `{"error":"cas_failed","current_modify_index":N}` (0 when the key does not exist) |
-| 413 | Value too large. | `{"error":"too_large",...}` |
+| 413 | Value or encoded Raft entry too large. | `{"error":"too_large",...}` |
 | 422 | Same `Idempotency-Key` with another request. | `{"error":"idempotency_key_reused"}` |
 | 503 | Known not applied. A retry is safe. Header `Retry-After: 1`. | `{"error":"command_rejected","reason","retry_safe":true}` |
 | 504 | Outcome unknown. The write may still commit. | `{"error":"outcome_unknown","reason","retry_safe":false}` |
@@ -151,6 +164,7 @@ The node reads these environment variables. A bad value is an error that names t
 | `KV_COMMAND_TIMEOUT` | `5s` | Deadline for each write and each raft call. |
 | `KV_RAFT_TLS_CA_FILE`, `KV_RAFT_TLS_CERT_FILE`, `KV_RAFT_TLS_KEY_FILE` | empty | Mutual TLS files. |
 | `KV_RAFT_INSECURE_PLAINTEXT` | `false` | Plain TCP for Raft. Without it, you must set the TLS files. |
+| `KV_ADMIN_TOKEN` | empty | Bearer token for the 4 admin calls. Empty = the admin calls answer 403. |
 | `KV_LOG_LEVEL`, `KV_LOG_JSON` | `info`, `false` | Logging. |
 
 ## Tests
@@ -206,13 +220,16 @@ make start NODE=node1        # use the node that make kill-leader printed
 make down
 ```
 
+Certificates: the jobs `certs-node1` to `certs-node3` create the CA and the key pairs in the volume `certs-ca`. No node mounts that volume.
+Each job copies `ca.crt` and the key pair of one node into `nodeN-certs`. nodeN mounts only that volume, read-only.
+
 The Raft network `kvstore-part2_raft` uses the subnet 172.28.11.0/24. Change it with `KV_SUBNET_PREFIX`.
 Change the HTTP host ports with `KV_NODE1_HTTP_PORT`, `KV_NODE2_HTTP_PORT` and `KV_NODE3_HTTP_PORT`.
 
 ## Failure scenarios and tests
 
 Each failure test has a doc comment with Scenario, Expected and Raft lesson.
-Cluster tests are in `tests/cluster/`. E2E tests are in `tests/e2e/e2e_test.go` (one `TestDockerCluster`, six subtests).
+Cluster tests are in `tests/cluster/`. E2E tests are in `tests/e2e/e2e_test.go` (one `TestDockerCluster`, eight subtests).
 The findings with more detail are in [docs/lessons-from-tests.md](docs/lessons-from-tests.md).
 
 | Failure scenario | Test | Raft lesson |
@@ -255,6 +272,13 @@ The findings with more detail are in [docs/lessons-from-tests.md](docs/lessons-f
 | Wrong CA, forged heartbeat | `TestTLSPeerWithCertificateFromAnotherCACannotSendRPCs` | Raft RPCs have no authentication. Mutual TLS must reject the peer first. |
 | Wrong CA, node joins | `TestTLSPeerWithCertificateFromAnotherCACannotJoin` | A node without a cluster certificate gets no log. |
 | 3 nodes over mutual TLS | `TestTLSClusterElectsLeaderAndReplicates` | A TLS stream layer secures every RPC. |
+| Silent peer on the Raft port | `TestSilentInboundConnectionIsClosedAfterTheHandshakeTimeout` | Give the server side of the handshake a deadline. Do not run it in `Accept`. |
+| Write on a busy follower | `TestBusyFollowerWriteIsForwardedToLeader` | A busy follower times out instead of saying "not leader". Check `State()` first. |
+| `leader` read on a new leader | `TestLeaderReadOnNewLeaderWaitsForBarrier` | A new leader may not have applied acknowledged writes. Wait for the barrier. |
+| Value full of `<` | `TestPutRejectsValueWhoseEncodedCommandIsTooLarge` | JSON escaping makes the entry 6 times bigger. Limit the encoded entry. |
+| Transfer to a non-voter | `TestTransferLeadershipToNonvoterIsRejected` | raft accepts it and forces an election (#727). Check the suffrage first. |
+| Non-voter add on a voter ID | `TestMembershipAddNonvoterOnExistingVoterIsRejected` | raft keeps the voter but rewrites its address. |
+| Admin call without a token | `TestAdminCallWithoutAValidTokenIs401` | Membership calls change the quorum. Protect them. |
 | Random faults, checked | `TestLinearizabilityPutAndGetUnderFaults` | The whole error contract must hold. Porcupine checks it. |
 | Stale read, checked | `TestLinearizabilityCheckerFindsStaleRead` | The checker can fail. It finds a real stale read. |
 | Outcome unknown in the history | `TestLinearizabilityModelOpenAndRejectedWrites` | Keep a timed-out write as "maybe". Drop only a rejected write. |
@@ -271,7 +295,7 @@ The findings with more detail are in [docs/lessons-from-tests.md](docs/lessons-f
 |---|---|---|
 | Language, web layer | Python 3.12, FastAPI | Go 1.25, `net/http` |
 | Write on a follower | The library forwards. | The application forwards (one hop, hold while no leader). |
-| Linearizable read | One log entry for each read. | `VerifyLeader()` after a barrier in the current term. No log entry. |
+| Linearizable read | One log entry for each read. | `VerifyLeader()`, then a check that the barrier is done in the same term. No log entry. |
 | Three read modes | linearizable, stale | linearizable, leader, stale with `max_stale` |
 | Pre-vote | None. A rejoining node disrupts the leader. | On. `PreVoteDisabled` shows the old behavior. |
 | Disk | Memory-mapped journal, no fsync. | raft-boltdb with fsync. Snapshots with fsync. |
