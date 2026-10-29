@@ -2,13 +2,11 @@
 
 ## Status
 
-- Wave 1 (core, inline): done. 3-node smoke, restart and full-restart recovery checked by hand.
-- Wave 2 (phases 2, 3, 4): done. 16 cluster tests, 21 API tests. Core fixes: is_ready() barrier, fast "no_quorum" 503.
-- Wave 3: phase 5 (Docker + e2e) in progress. Phase 6 (README + findings in the reference doc) starts after phase 5 and research.
-- Findings to document: no pre-vote, no fsync (mmap journal), commit index saved once per second,
-  stale leader address on a cut-off follower, write latency about 2 heartbeats, LEADER_CHANGED is ambiguous.
-- Gotchas: `LEADER_CHANGED` is an unknown outcome, not a safe retry. `commandsWaitLeader=False` makes "no leader" fail fast.
-  `useFork=False` (fork with threads can deadlock). More in `part1-pysyncobj/docs/pysyncobj-reference.md`.
+- All phases done (1-7). Phase 7 added peer encryption (KV_RAFT_PASSWORD), not in the original list.
+- Tests: 56 unit + cluster (`uv run pytest`), 6 Docker e2e (`uv run pytest -m docker`). All pass.
+- Code review done. Skipped on purpose: cached readiness, dev default peer password (both in README).
+- Docs: README, docs/lessons-from-tests.md, docs/pysyncobj-reference.md, ../docs/raft-in-production.md.
+- Next: part 2 (Go + hashicorp/raft) needs its own plan.
 
 ## Goal
 
